@@ -9,112 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Lora:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
-    <style>
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #050505;
-            color: #d6d3d1;
-            margin: 0;
-            padding: 0;
-            overflow-x: hidden;
-        }
-        .font-serif {
-            font-family: 'Lora', serif;
-        }
-        ::-webkit-scrollbar {
-            width: 6px;
-        }
-        ::-webkit-scrollbar-track {
-            background: #050505;
-        }
-        ::-webkit-scrollbar-thumb {
-            background: #1c1917;
-            border-radius: 10px;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-            background: #292524;
-        }
-        
-        /* Анимации переходов */
-        @keyframes reveal-details {
-            0% { 
-                opacity: 0; 
-                transform: scale(1.05) translateY(20px);
-                filter: blur(10px);
-            }
-            100% { 
-                opacity: 1; 
-                transform: scale(1) translateY(0);
-                filter: blur(0);
-            }
-        }
 
-        @keyframes reveal-list {
-            0% { 
-                opacity: 0; 
-                transform: scale(0.98);
-            }
-            100% { 
-                opacity: 1; 
-                transform: scale(1);
-            }
-        }
-
-        @keyframes tab-switch-reveal {
-            0% {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-            100% {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .animate-reveal-details {
-            animation: reveal-details 0.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-        }
-
-        .animate-reveal-list {
-            animation: reveal-list 0.5s ease-out forwards;
-        }
-
-        .animate-tab-switch {
-            animation: tab-switch-reveal 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
-        }
-
-        /* Плавность элементов графа */
-        .node-group {
-            transition: opacity 0.8s cubic-bezier(0.4, 0, 0.2, 1), filter 0.8s ease;
-        }
-        
-        .node-content {
-            transition: transform 0.8s cubic-bezier(0.34, 1.56, 0.64, 1);
-        }
-        
-        path {
-            transition: stroke-opacity 0.8s ease, stroke 0.8s ease;
-        }
-
-        .graph-container-appear {
-            animation: graph-fade 1s ease-out forwards;
-        }
-
-        @keyframes graph-fade {
-            from { opacity: 0; filter: blur(5px); }
-            to { opacity: 1; filter: blur(0); }
-        }
-
-        input:-webkit-autofill,
-        input:-webkit-autofill:hover, 
-        input:-webkit-autofill:focus, 
-        input:-webkit-autofill:active  {
-            -webkit-box-shadow: 0 0 0 30px #050505 inset !important;
-            -webkit-text-fill-color: #d6d3d1 !important;
-        }
-    </style>
-
-<link rel="stylesheet" href="/index.css">
 <script type="importmap">
 {
   "imports": {
@@ -127,7 +22,8 @@
   }
 }
 </script>
-  <script type="module" crossorigin src="/raz/assets/index-C4vTbAuM.js"></script>
+  <script type="module" crossorigin src="/raz/assets/index-Bobwcgof.js"></script>
+  <link rel="stylesheet" crossorigin href="/raz/assets/index-CncpWvTA.css">
 </head>
 <body>
     <div id="root"></div>
