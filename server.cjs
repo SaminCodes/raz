@@ -317,6 +317,80 @@ async function startServer() {
       }
     }
   });
+  let cachedQuoteBlocks = [];
+  let allUniqueCharacters = [];
+  function loadAndParseQuotes() {
+    if (cachedQuoteBlocks.length > 0) return;
+    const filePath = import_path.default.join(process.cwd(), "rp_messages_converted.txt");
+    if (!import_fs.default.existsSync(filePath)) {
+      console.warn("rp_messages_converted.txt not found at:", filePath);
+      return;
+    }
+    try {
+      const content = import_fs.default.readFileSync(filePath, "utf-8");
+      const lines = content.split(/\r?\n/);
+      const tempBlocks = [];
+      const uniqueNames = /* @__PURE__ */ new Set();
+      let currentBlock = null;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith("[")) {
+          const closingBracketIndex = trimmed.indexOf("]");
+          if (closingBracketIndex > 0) {
+            const charName = trimmed.substring(1, closingBracketIndex).trim();
+            let textPart = trimmed.substring(closingBracketIndex + 1).trim();
+            if (textPart.startsWith("\u2014") || textPart.startsWith("-") || textPart.startsWith(":")) {
+              textPart = textPart.substring(1).trim();
+            }
+            if (charName && textPart) {
+              uniqueNames.add(charName);
+              if (currentBlock && currentBlock.characterName === charName) {
+                currentBlock.replicas.push(textPart);
+              } else {
+                if (currentBlock) {
+                  tempBlocks.push(currentBlock);
+                }
+                currentBlock = {
+                  characterName: charName,
+                  replicas: [textPart]
+                };
+              }
+            }
+          }
+        }
+      }
+      if (currentBlock) {
+        tempBlocks.push(currentBlock);
+      }
+      cachedQuoteBlocks = tempBlocks.filter((b) => b.replicas.length > 0);
+      allUniqueCharacters = Array.from(uniqueNames);
+      console.log(`Successfully parsed ${cachedQuoteBlocks.length} quote blocks and ${allUniqueCharacters.length} characters.`);
+    } catch (e) {
+      console.error("Error parsing rp_messages_converted.txt:", e);
+    }
+  }
+  app.get("/api/quotes/random", (req, res) => {
+    try {
+      loadAndParseQuotes();
+      if (cachedQuoteBlocks.length === 0) {
+        return res.status(504).json({ error: "No quotes available or file parsing failed." });
+      }
+      const randomIndex = Math.floor(Math.random() * cachedQuoteBlocks.length);
+      const selectedBlock = cachedQuoteBlocks[randomIndex];
+      const otherChars = allUniqueCharacters.filter((name) => name !== selectedBlock.characterName);
+      const shuffledOthers = otherChars.sort(() => 0.5 - Math.random());
+      const wrongOptions = shuffledOthers.slice(0, 9);
+      const options = [selectedBlock.characterName, ...wrongOptions].sort(() => 0.5 - Math.random());
+      res.json({
+        replicas: selectedBlock.replicas,
+        options,
+        correctAnswer: selectedBlock.characterName
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message || "Internal server error" });
+    }
+  });
   if (process.env.NODE_ENV !== "production") {
     const vite = await (0, import_vite.createServer)({
       server: { middlewareMode: true },
