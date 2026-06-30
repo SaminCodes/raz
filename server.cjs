@@ -193,6 +193,471 @@ async function startServer() {
       });
     }
   });
+  app.post("/api/nanobanana/generate", async (req, res) => {
+    try {
+      const { endpoint, apiKey, prompt, model, size, response_format, negative_prompt } = req.body;
+      if (!apiKey) {
+        return res.status(400).json({ error: "\u041E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 \u043A\u043B\u044E\u0447 API (API Key is required)" });
+      }
+      if (!prompt) {
+        return res.status(400).json({ error: "\u041E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 \u043F\u0440\u043E\u043C\u043F\u0442 (Prompt is required)" });
+      }
+      const targetUrl = endpoint || "https://api.nanobanana.pro/v1/images/generations";
+      console.log(`Forwarding image generation request to: ${targetUrl} for model: ${model || "default"}`);
+      const requestBody = {
+        prompt,
+        n: 1,
+        size: size || "1024x1024"
+      };
+      if (model) {
+        requestBody.model = model;
+      }
+      if (response_format) {
+        requestBody.response_format = response_format;
+      }
+      if (negative_prompt) {
+        requestBody.negative_prompt = negative_prompt;
+      }
+      const apiResponse = await fetch(targetUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(requestBody)
+      });
+      if (!apiResponse.ok) {
+        const errorText = await apiResponse.text();
+        console.error(`Nanobanana API returned error status ${apiResponse.status}:`, errorText);
+        let parsedError;
+        try {
+          parsedError = JSON.parse(errorText);
+        } catch {
+          parsedError = { error: errorText };
+        }
+        return res.status(apiResponse.status).json({
+          error: parsedError.error?.message || parsedError.error || `\u041E\u0448\u0438\u0431\u043A\u0430 NanoBanana API (\u041A\u043E\u0434: ${apiResponse.status})`,
+          details: parsedError
+        });
+      }
+      const resData = await apiResponse.json();
+      console.log("Nanobanana API response received successfully!");
+      let imageUrl = "";
+      if (resData.data && Array.isArray(resData.data) && resData.data[0]) {
+        imageUrl = resData.data[0].url || (resData.data[0].b64_json ? `data:image/png;base64,${resData.data[0].b64_json}` : "");
+      } else if (resData.imageUrl) {
+        imageUrl = resData.imageUrl;
+      } else if (resData.url) {
+        imageUrl = resData.url;
+      } else if (resData.image) {
+        imageUrl = resData.image;
+      } else {
+        imageUrl = resData.url || "";
+      }
+      if (!imageUrl) {
+        console.warn("Could not parse image URL from response:", JSON.stringify(resData));
+        return res.status(500).json({
+          error: "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0438\u0437\u0432\u043B\u0435\u0447\u044C URL \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u044F \u0438\u0437 \u043E\u0442\u0432\u0435\u0442\u0430 API. \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u043F\u0440\u0430\u0432\u0438\u043B\u044C\u043D\u043E\u0441\u0442\u044C \u044D\u043D\u0434\u043F\u043E\u0438\u043D\u0442\u0430 \u0438\u043B\u0438 \u043E\u0431\u0440\u0430\u0442\u0438\u0442\u0435\u0441\u044C \u0432 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u043A\u0443.",
+          rawResponse: resData
+        });
+      }
+      res.json({ imageUrl });
+    } catch (err) {
+      console.error("Nanobanana proxy error:", err);
+      res.status(500).json({ error: err.message || "\u0412\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u044F\u044F \u043E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u043F\u0440\u0438 \u043F\u0440\u043E\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0438 \u0437\u0430\u043F\u0440\u043E\u0441\u0430" });
+    }
+  });
+  function parseCSV(csvText) {
+    const result = [];
+    let row = [];
+    let currentVal = "";
+    let insideQuote = false;
+    for (let i = 0; i < csvText.length; i++) {
+      const char = csvText[i];
+      const nextChar = csvText[i + 1];
+      if (char === '"') {
+        if (insideQuote && nextChar === '"') {
+          currentVal += '"';
+          i++;
+        } else {
+          insideQuote = !insideQuote;
+        }
+      } else if (char === "," && !insideQuote) {
+        row.push(currentVal);
+        currentVal = "";
+      } else if ((char === "\r" || char === "\n") && !insideQuote) {
+        if (char === "\r" && nextChar === "\n") {
+          i++;
+        }
+        row.push(currentVal);
+        result.push(row);
+        row = [];
+        currentVal = "";
+      } else {
+        currentVal += char;
+      }
+    }
+    if (currentVal || row.length > 0) {
+      row.push(currentVal);
+      result.push(row);
+    }
+    if (result.length === 0) return [];
+    const headers = result[0].map((h) => h.trim());
+    const rows = result.slice(1);
+    return rows.filter((r) => r.length > 0 && r.some((cell) => cell.trim() !== "")).map((r) => {
+      const obj = {};
+      headers.forEach((h, idx) => {
+        obj[h] = r[idx] !== void 0 ? r[idx] : "";
+      });
+      return obj;
+    });
+  }
+  let fileListCache = null;
+  const CACHE_TTL = 5 * 60 * 1e3;
+  app.get("/api/github/files", async (req, res) => {
+    try {
+      const now = Date.now();
+      if (fileListCache && now - fileListCache.timestamp < CACHE_TTL) {
+        return res.json(fileListCache.data);
+      }
+      console.log("Fetching file list from GitHub repository SaminCodes/raz_storage...");
+      const apiResponse = await fetch("https://api.github.com/repos/SaminCodes/raz_storage/contents", {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrono-Haven-App/1.0"
+        }
+      });
+      if (!apiResponse.ok) {
+        const errText = await apiResponse.text();
+        console.error("GitHub API error:", errText);
+        const fallbackList = [
+          { name: "\u043E\u0431\u0449\u0435\u0435.csv", path: "\u043E\u0431\u0449\u0435\u0435.csv", download_url: "https://raw.githubusercontent.com/SaminCodes/raz_storage/main/%D0%BE%D0%B1%D1%89%D0%B5%D0%B5.csv" }
+        ];
+        if (fileListCache) {
+          return res.json(fileListCache.data);
+        }
+        return res.json(fallbackList);
+      }
+      const contents = await apiResponse.json();
+      const csvFiles = contents.filter((file) => file.name.endsWith(".csv")).map((file) => ({
+        name: file.name,
+        path: file.path,
+        download_url: file.download_url
+      }));
+      fileListCache = { data: csvFiles, timestamp: now };
+      res.json(csvFiles);
+    } catch (err) {
+      console.error("Failed to fetch GitHub files:", err);
+      if (fileListCache) {
+        return res.json(fileListCache.data);
+      }
+      res.json([
+        { name: "\u043E\u0431\u0449\u0435\u0435.csv", path: "\u043E\u0431\u0449\u0435\u0435.csv", download_url: "https://raw.githubusercontent.com/SaminCodes/raz_storage/main/%D0%BE%D0%B1%D1%89%D0%B5%D0%B5.csv" }
+      ]);
+    }
+  });
+  let fileContentCache = {};
+  app.get("/api/github/file-content", async (req, res) => {
+    const filePath = req.query.path;
+    if (!filePath || typeof filePath !== "string") {
+      return res.status(400).json({ error: "\u041F\u0430\u0440\u0430\u043C\u0435\u0442\u0440 path \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u0435\u043D" });
+    }
+    try {
+      const now = Date.now();
+      if (fileContentCache[filePath] && now - fileContentCache[filePath].timestamp < CACHE_TTL) {
+        return res.json(fileContentCache[filePath].data);
+      }
+      const downloadUrl = `https://raw.githubusercontent.com/SaminCodes/raz_storage/main/${encodeURIComponent(filePath)}`;
+      console.log(`Fetching CSV content from: ${downloadUrl}`);
+      const response = await fetch(downloadUrl);
+      if (!response.ok) {
+        throw new Error(`\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0444\u0430\u0439\u043B ${filePath} (\u041A\u043E\u0434: ${response.status})`);
+      }
+      const csvText = await response.text();
+      const parsedData = parseCSV(csvText);
+      fileContentCache[filePath] = { data: parsedData, timestamp: now };
+      res.json(parsedData);
+    } catch (err) {
+      console.error(`Failed to load file content for ${filePath}:`, err);
+      res.status(500).json({ error: err.message || "\u041E\u0448\u0438\u0431\u043A\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0438 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u0433\u043E \u0444\u0430\u0439\u043B\u0430" });
+    }
+  });
+  function parsePostContentOnServer(rawContent) {
+    if (!rawContent) return { header: null, body: "", characterNames: [] };
+    let match = rawContent.match(/^\s*[\u2014\u2013-]\s*([^\n\r]+?)\s*[\u2014\u2013-]\s*(?:\r?\n)?/);
+    if (!match) {
+      match = rawContent.match(/^\s*__\s*(?:["'«“])?\s*([^\n\r"'«»“”_]+?)\s*(?:["'»“”])?\s*__\s*(?:\r?\n)?/);
+    }
+    if (!match) {
+      match = rawContent.match(/^\s*_\s*(?:["'«“])?\s*([^\n\r"'«»“”_]+?)\s*(?:["'»“”])?\s*_\s*(?:\r?\n)?/);
+    }
+    if (match) {
+      const headerLine = match[0];
+      const headerText = match[1];
+      const body = rawContent.replace(headerLine, "").trim();
+      const characterNames = headerText.split(/\s+(?:и|and|&|и)\s+|\s*[/&,]\s*/).map((n) => n.trim()).filter(Boolean);
+      return {
+        header: headerText,
+        body,
+        characterNames
+      };
+    }
+    return {
+      header: null,
+      body: rawContent,
+      characterNames: []
+    };
+  }
+  function isValidPostOnServer(post) {
+    const rawContent = (post.Content || "").trim();
+    if (!rawContent) return false;
+    const cleanContent = rawContent.replace(/<@&?\d+>/g, "").replace(/<#\d+>/g, "").replace(/<:\w+:\d+>/g, "").replace(/https?:\/\/\S+/g, "").trim();
+    if (!cleanContent) return false;
+    if (/^\d+$/.test(cleanContent)) return false;
+    const { body } = parsePostContentOnServer(rawContent);
+    const cleanBody = body.replace(/<@&?\d+>/g, "").replace(/<#\d+>/g, "").replace(/<:\w+:\d+>/g, "").replace(/https?:\/\/\S+/g, "").trim();
+    if (!cleanBody) return false;
+    if (/^\d+$/.test(cleanBody)) return false;
+    return true;
+  }
+  let allStatsCache = null;
+  app.get("/api/github/all-stats", async (req, res) => {
+    try {
+      const now = Date.now();
+      if (allStatsCache && now - allStatsCache.timestamp < CACHE_TTL) {
+        return res.json(allStatsCache.data);
+      }
+      let csvFiles = [];
+      if (fileListCache && now - fileListCache.timestamp < CACHE_TTL) {
+        csvFiles = fileListCache.data;
+      } else {
+        const apiResponse = await fetch("https://api.github.com/repos/SaminCodes/raz_storage/contents", {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrono-Haven-App/1.0"
+          }
+        });
+        if (apiResponse.ok) {
+          const contents = await apiResponse.json();
+          csvFiles = contents.filter((file) => file.name.endsWith(".csv")).map((file) => ({
+            name: file.name,
+            path: file.path,
+            download_url: file.download_url
+          }));
+          fileListCache = { data: csvFiles, timestamp: now };
+        } else {
+          csvFiles = fileListCache ? fileListCache.data : [
+            { name: "\u043E\u0431\u0449\u0435\u0435.csv", path: "\u043E\u0431\u0449\u0435\u0435.csv", download_url: "https://raw.githubusercontent.com/SaminCodes/raz_storage/main/%D0%BE%D0%B1%D1%89%D0%B5%D0%B5.csv" }
+          ];
+        }
+      }
+      const allFilesData = [];
+      await Promise.all(csvFiles.map(async (file) => {
+        try {
+          const filePath = file.path;
+          let parsedData = [];
+          if (fileContentCache[filePath] && now - fileContentCache[filePath].timestamp < CACHE_TTL) {
+            parsedData = fileContentCache[filePath].data;
+          } else {
+            const downloadUrl = `https://raw.githubusercontent.com/SaminCodes/raz_storage/main/${encodeURIComponent(filePath)}`;
+            const response = await fetch(downloadUrl);
+            if (response.ok) {
+              const csvText = await response.text();
+              parsedData = parseCSV(csvText);
+              fileContentCache[filePath] = { data: parsedData, timestamp: now };
+            } else if (fileContentCache[filePath]) {
+              parsedData = fileContentCache[filePath].data;
+            }
+          }
+          if (parsedData && parsedData.length > 0) {
+            allFilesData.push({ fileName: file.name, posts: parsedData });
+          }
+        } catch (err) {
+          console.error(`Error loading file content for stats (${file.name}):`, err);
+        }
+      }));
+      let totalPosts = 0;
+      let totalCharacters = 0;
+      const byDate = {};
+      const byDayOfWeek = [0, 0, 0, 0, 0, 0, 0];
+      const byHour = {};
+      for (let h = 0; h < 24; h++) byHour[h] = 0;
+      const byCharacter = {};
+      const byAuthor = {};
+      const byFile = {};
+      let overallLongestPost = {
+        length: 0,
+        content: "",
+        characterName: "",
+        author: "",
+        date: "",
+        fileName: ""
+      };
+      allFilesData.forEach(({ fileName, posts }) => {
+        let filePostsCount = 0;
+        let fileTotalChars = 0;
+        const mergedPosts = [];
+        posts.forEach((post) => {
+          const rawContent = (post.Content || "").trim();
+          const parsed = parsePostContentOnServer(rawContent);
+          if (parsed.characterNames.length > 0) {
+            mergedPosts.push({ ...post });
+          } else {
+            if (mergedPosts.length > 0) {
+              const lastPost = mergedPosts[mergedPosts.length - 1];
+              lastPost.Content = (lastPost.Content || "") + "\n\n" + (post.Content || "");
+            } else {
+              mergedPosts.push({ ...post });
+            }
+          }
+        });
+        mergedPosts.forEach((post) => {
+          if (!isValidPostOnServer(post)) return;
+          const rawContent = post.Content || "";
+          const { body, characterNames } = parsePostContentOnServer(rawContent);
+          const bodyLen = body.length;
+          const authorName = post.Username || "\u0410\u043D\u043E\u043D\u0438\u043C";
+          totalPosts++;
+          totalCharacters += bodyLen;
+          filePostsCount++;
+          fileTotalChars += bodyLen;
+          const dateStr = post.Date || "";
+          if (dateStr) {
+            const parts = dateStr.split(",");
+            const datePart = parts[0]?.trim();
+            const timePart = parts[1]?.trim();
+            if (datePart && /^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+              byDate[datePart] = (byDate[datePart] || 0) + 1;
+              try {
+                const d = new Date(datePart);
+                if (!isNaN(d.getTime())) {
+                  const day = d.getDay();
+                  byDayOfWeek[day] = (byDayOfWeek[day] || 0) + 1;
+                }
+              } catch (e) {
+              }
+            }
+            if (timePart) {
+              const hourMatch = timePart.match(/^(\d{2})/);
+              if (hourMatch) {
+                const hour = parseInt(hourMatch[1], 10);
+                if (hour >= 0 && hour < 24) {
+                  byHour[hour] = (byHour[hour] || 0) + 1;
+                }
+              }
+            }
+          }
+          if (bodyLen > overallLongestPost.length) {
+            overallLongestPost = {
+              length: bodyLen,
+              content: body,
+              characterName: characterNames.length > 0 ? characterNames.join(" & ") : "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u043E",
+              author: authorName,
+              date: dateStr,
+              fileName
+            };
+          }
+          if (characterNames.length > 0) {
+            characterNames.forEach((charName) => {
+              if (!byCharacter[charName]) {
+                byCharacter[charName] = {
+                  postsCount: 0,
+                  totalChars: 0,
+                  longestPostLength: 0,
+                  longestPostContent: "",
+                  longestPostDate: "",
+                  longestPostFile: "",
+                  files: {},
+                  hours: {},
+                  dates: {},
+                  authors: {}
+                };
+              }
+              const cStat = byCharacter[charName];
+              cStat.postsCount++;
+              cStat.totalChars += bodyLen;
+              if (bodyLen > cStat.longestPostLength) {
+                cStat.longestPostLength = bodyLen;
+                cStat.longestPostContent = body;
+                cStat.longestPostDate = dateStr;
+                cStat.longestPostFile = fileName;
+              }
+              const cleanFileName2 = fileName.replace(/\.csv$/i, "");
+              cStat.files[cleanFileName2] = (cStat.files[cleanFileName2] || 0) + 1;
+              cStat.authors[authorName] = (cStat.authors[authorName] || 0) + 1;
+              if (dateStr) {
+                const parts = dateStr.split(",");
+                const datePart = parts[0]?.trim();
+                const timePart = parts[1]?.trim();
+                if (datePart && /^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+                  cStat.dates[datePart] = (cStat.dates[datePart] || 0) + 1;
+                }
+                if (timePart) {
+                  const hourMatch = timePart.match(/^(\d{2})/);
+                  if (hourMatch) {
+                    const hour = parseInt(hourMatch[1], 10);
+                    if (hour >= 0 && hour < 24) {
+                      cStat.hours[hour] = (cStat.hours[hour] || 0) + 1;
+                    }
+                  }
+                }
+              }
+            });
+          }
+          if (!byAuthor[authorName]) {
+            byAuthor[authorName] = { postsCount: 0, totalChars: 0, longestPostLength: 0, longestPostContent: "" };
+          }
+          const aStat = byAuthor[authorName];
+          aStat.postsCount++;
+          aStat.totalChars += bodyLen;
+          if (bodyLen > aStat.longestPostLength) {
+            aStat.longestPostLength = bodyLen;
+            aStat.longestPostContent = body;
+          }
+        });
+        const cleanFileName = fileName.replace(/\.csv$/i, "");
+        byFile[cleanFileName] = { postsCount: filePostsCount, totalChars: fileTotalChars };
+      });
+      const characterLeaderboard = Object.entries(byCharacter).map(([name, stat]) => ({
+        name,
+        postsCount: stat.postsCount,
+        totalChars: stat.totalChars,
+        averageLength: Math.round(stat.totalChars / (stat.postsCount || 1)),
+        longestPostLength: stat.longestPostLength,
+        longestPostContent: stat.longestPostContent,
+        longestPostDate: stat.longestPostDate,
+        longestPostFile: stat.longestPostFile,
+        files: stat.files,
+        hours: stat.hours,
+        dates: stat.dates,
+        authors: stat.authors
+      })).sort((a, b) => b.totalChars - a.totalChars);
+      const authorLeaderboard = Object.entries(byAuthor).map(([name, stat]) => ({
+        name,
+        postsCount: stat.postsCount,
+        totalChars: stat.totalChars,
+        averageLength: Math.round(stat.totalChars / (stat.postsCount || 1)),
+        longestPostLength: stat.longestPostLength,
+        longestPostContent: stat.longestPostContent
+      })).sort((a, b) => b.totalChars - a.totalChars);
+      const payload = {
+        totalPosts,
+        totalCharacters,
+        averagePostLength: totalPosts > 0 ? Math.round(totalCharacters / totalPosts) : 0,
+        overallLongestPost,
+        byDate,
+        byDayOfWeek,
+        byHour,
+        characterLeaderboard,
+        authorLeaderboard,
+        byFile,
+        lastUpdated: now
+      };
+      allStatsCache = { data: payload, timestamp: now };
+      res.json(payload);
+    } catch (err) {
+      console.error("Failed to generate combined stats:", err);
+      res.status(500).json({ error: err.message || "\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u0438 \u043F\u043E\u0434\u0441\u0447\u0435\u0442\u0435 \u043E\u0431\u0449\u0435\u0439 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0438" });
+    }
+  });
   app.post("/api/gemini/search-grounding", async (req, res) => {
     try {
       const { query } = req.body;
