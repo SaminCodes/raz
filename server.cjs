@@ -33,6 +33,12 @@ async function startServer() {
   const PORT = 3e3;
   app.use((0, import_cors.default)());
   app.use(import_express.default.json({ limit: "50mb" }));
+  app.use((req, res, next) => {
+    if (req.url.startsWith("/raz/api/")) {
+      req.url = req.url.substring(4);
+    }
+    next();
+  });
   const getAI = () => {
     const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
     if (!apiKey) {
