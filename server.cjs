@@ -389,6 +389,15 @@ async function startServer() {
   });
   function parsePostContentOnServer(rawContent) {
     if (!rawContent) return { header: null, body: "", characterNames: [] };
+    const trimmed = rawContent.trim();
+    if (trimmed.startsWith("|--")) {
+      const body = trimmed.substring(3).trim();
+      return {
+        header: "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435",
+        body,
+        characterNames: ["\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435"]
+      };
+    }
     let match = rawContent.match(/^\s*[\u2014\u2013-]\s*([^\n\r]+?)\s*[\u2014\u2013-]\s*(?:\r?\n)?/);
     if (!match) {
       match = rawContent.match(/^\s*__\s*(?:["'«“])?\s*([^\n\r"'«»“”_]+?)\s*(?:["'»“”])?\s*__\s*(?:\r?\n)?/);
@@ -425,12 +434,16 @@ async function startServer() {
     if (/^\d+$/.test(cleanBody)) return false;
     return true;
   }
-  let allStatsCache = null;
-  app.get("/api/github/all-stats", async (req, res) => {
+  const statsCacheMap = /* @__PURE__ */ new Map();
+  app.all("/api/github/all-stats", async (req, res) => {
     try {
       const now = Date.now();
-      if (allStatsCache && now - allStatsCache.timestamp < CACHE_TTL) {
-        return res.json(allStatsCache.data);
+      const customMappings = req.body?.mappings || {};
+      const cacheKey = JSON.stringify(customMappings);
+      const isForceRefresh = req.query.refresh === "true";
+      const cached = statsCacheMap.get(cacheKey);
+      if (cached && now - cached.timestamp < CACHE_TTL && !isForceRefresh) {
+        return res.json(cached.data);
       }
       let csvFiles = [];
       if (fileListCache && now - fileListCache.timestamp < CACHE_TTL) {
@@ -504,7 +517,11 @@ async function startServer() {
         posts.forEach((post) => {
           const rawContent = (post.Content || "").trim();
           const parsed = parsePostContentOnServer(rawContent);
-          if (parsed.characterNames.length > 0) {
+          let hasCharacter = parsed.characterNames.length > 0;
+          if (!hasCharacter && post.Username && customMappings[post.Username]) {
+            hasCharacter = true;
+          }
+          if (hasCharacter) {
             mergedPosts.push({ ...post });
           } else {
             if (mergedPosts.length > 0) {
@@ -518,7 +535,22 @@ async function startServer() {
         mergedPosts.forEach((post) => {
           if (!isValidPostOnServer(post)) return;
           const rawContent = post.Content || "";
-          const { body, characterNames } = parsePostContentOnServer(rawContent);
+          const { body, characterNames: rawCharacterNames } = parsePostContentOnServer(rawContent);
+          let characterNames = [];
+          if (rawCharacterNames.length === 0 && post.Username && customMappings[post.Username]) {
+            characterNames = customMappings[post.Username].split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+          } else {
+            const tempNames = [];
+            (rawCharacterNames.length > 0 ? rawCharacterNames : []).forEach((name) => {
+              const mapped = customMappings[name];
+              if (mapped) {
+                mapped.split(/[,;]+/).map((s) => s.trim()).filter(Boolean).forEach((n) => tempNames.push(n));
+              } else {
+                tempNames.push(name);
+              }
+            });
+            characterNames = tempNames;
+          }
           const bodyLen = body.length;
           const authorName = post.Username || "\u0410\u043D\u043E\u043D\u0438\u043C";
           totalPosts++;
@@ -657,7 +689,7 @@ async function startServer() {
         byFile,
         lastUpdated: now
       };
-      allStatsCache = { data: payload, timestamp: now };
+      statsCacheMap.set(cacheKey, { data: payload, timestamp: now });
       res.json(payload);
     } catch (err) {
       console.error("Failed to generate combined stats:", err);
