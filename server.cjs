@@ -387,6 +387,23 @@ async function startServer() {
       res.status(500).json({ error: err.message || "\u041E\u0448\u0438\u0431\u043A\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0438 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u0433\u043E \u0444\u0430\u0439\u043B\u0430" });
     }
   });
+  function getCleanBodyText(text) {
+    if (!text) return "";
+    return text.replace(/<@&?\d+>/g, "").replace(/<#\d+>/g, "").replace(/<a?:\w+:\d+>/g, "").replace(/https?:\/\/\S+/g, "").replace(/[\*_~`|]/g, "").trim();
+  }
+  function parseDateToTimestamp(dStr) {
+    if (!dStr) return 0;
+    const parts = dStr.split(",");
+    const datePart = parts[0]?.trim();
+    const timePart = parts[1]?.trim();
+    if (datePart && timePart) {
+      const d = /* @__PURE__ */ new Date(`${datePart}T${timePart}`);
+      if (!isNaN(d.getTime())) return d.getTime();
+    }
+    const fallback = new Date(dStr.replace(" ", "T"));
+    if (!isNaN(fallback.getTime())) return fallback.getTime();
+    return 0;
+  }
   function parsePostContentOnServer(rawContent) {
     if (!rawContent) return { header: null, body: "", characterNames: [] };
     const trimmed = rawContent.trim();
@@ -398,12 +415,12 @@ async function startServer() {
         characterNames: ["\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435"]
       };
     }
-    let match = rawContent.match(/^\s*[\u2014\u2013-]\s*([^\n\r]+?)\s*[\u2014\u2013-]\s*(?:\r?\n)?/);
+    let match = rawContent.match(/^\s*[\u2014\u2013-]\s*([^\n\r]+?)\s*[\u2014\u2013-]\s*(?:\r?\n|$)/);
     if (!match) {
-      match = rawContent.match(/^\s*__\s*(?:["'«“])?\s*([^\n\r"'«»“”_]+?)\s*(?:["'»“”])?\s*__\s*(?:\r?\n)?/);
+      match = rawContent.match(/^\s*__\s*(?:["'«“])?\s*([^\n\r"'«»“”_]+?)\s*(?:["'»“”])?\s*__\s*(?:\r?\n|$)/);
     }
     if (!match) {
-      match = rawContent.match(/^\s*_\s*(?:["'«“])?\s*([^\n\r"'«»“”_]+?)\s*(?:["'»“”])?\s*_\s*(?:\r?\n)?/);
+      match = rawContent.match(/^\s*_\s*(?:["'«“])?\s*([^\n\r"'«»“”_]+?)\s*(?:["'»“”])?\s*_\s*(?:\r?\n|$)/);
     }
     if (match) {
       const headerLine = match[0];
@@ -425,11 +442,11 @@ async function startServer() {
   function isValidPostOnServer(post) {
     const rawContent = (post.Content || "").trim();
     if (!rawContent) return false;
-    const cleanContent = rawContent.replace(/<@&?\d+>/g, "").replace(/<#\d+>/g, "").replace(/<:\w+:\d+>/g, "").replace(/https?:\/\/\S+/g, "").trim();
+    const cleanContent = rawContent.replace(/<@&?\d+>/g, "").replace(/<#\d+>/g, "").replace(/<a?:\w+:\d+>/g, "").replace(/https?:\/\/\S+/g, "").trim();
     if (!cleanContent) return false;
     if (/^\d+$/.test(cleanContent)) return false;
     const { body } = parsePostContentOnServer(rawContent);
-    const cleanBody = body.replace(/<@&?\d+>/g, "").replace(/<#\d+>/g, "").replace(/<:\w+:\d+>/g, "").replace(/https?:\/\/\S+/g, "").trim();
+    const cleanBody = body.replace(/<@&?\d+>/g, "").replace(/<#\d+>/g, "").replace(/<a?:\w+:\d+>/g, "").replace(/https?:\/\/\S+/g, "").trim();
     if (!cleanBody) return false;
     if (/^\d+$/.test(cleanBody)) return false;
     return true;
@@ -495,6 +512,8 @@ async function startServer() {
       }));
       let totalPosts = 0;
       let totalCharacters = 0;
+      let totalCharactersClean = 0;
+      let totalCharactersNoSpaces = 0;
       const byDate = {};
       const byDayOfWeek = [0, 0, 0, 0, 0, 0, 0];
       const byHour = {};
@@ -513,8 +532,11 @@ async function startServer() {
       allFilesData.forEach(({ fileName, posts }) => {
         let filePostsCount = 0;
         let fileTotalChars = 0;
+        let fileTotalCharsClean = 0;
+        let fileTotalCharsNoSpaces = 0;
+        const sortedPosts = [...posts].sort((a, b) => parseDateToTimestamp(a.Date) - parseDateToTimestamp(b.Date));
         const mergedPosts = [];
-        posts.forEach((post) => {
+        sortedPosts.forEach((post) => {
           const rawContent = (post.Content || "").trim();
           const parsed = parsePostContentOnServer(rawContent);
           let hasCharacter = parsed.characterNames.length > 0;
@@ -551,12 +573,20 @@ async function startServer() {
             });
             characterNames = tempNames;
           }
+          characterNames = Array.from(new Set(characterNames));
           const bodyLen = body.length;
+          const cleanBody = getCleanBodyText(body);
+          const bodyLenClean = cleanBody.length;
+          const bodyLenNoSpaces = cleanBody.replace(/\s/g, "").length;
           const authorName = post.Username || "\u0410\u043D\u043E\u043D\u0438\u043C";
           totalPosts++;
           totalCharacters += bodyLen;
+          totalCharactersClean += bodyLenClean;
+          totalCharactersNoSpaces += bodyLenNoSpaces;
           filePostsCount++;
           fileTotalChars += bodyLen;
+          fileTotalCharsClean += bodyLenClean;
+          fileTotalCharsNoSpaces += bodyLenNoSpaces;
           const dateStr = post.Date || "";
           if (dateStr) {
             const parts = dateStr.split(",");
@@ -599,6 +629,8 @@ async function startServer() {
                 byCharacter[charName] = {
                   postsCount: 0,
                   totalChars: 0,
+                  totalCharsClean: 0,
+                  totalCharsNoSpaces: 0,
                   longestPostLength: 0,
                   longestPostContent: "",
                   longestPostDate: "",
@@ -612,6 +644,8 @@ async function startServer() {
               const cStat = byCharacter[charName];
               cStat.postsCount++;
               cStat.totalChars += bodyLen;
+              cStat.totalCharsClean += bodyLenClean;
+              cStat.totalCharsNoSpaces += bodyLenNoSpaces;
               if (bodyLen > cStat.longestPostLength) {
                 cStat.longestPostLength = bodyLen;
                 cStat.longestPostContent = body;
@@ -619,7 +653,13 @@ async function startServer() {
                 cStat.longestPostFile = fileName;
               }
               const cleanFileName2 = fileName.replace(/\.csv$/i, "");
-              cStat.files[cleanFileName2] = (cStat.files[cleanFileName2] || 0) + 1;
+              if (!cStat.files[cleanFileName2]) {
+                cStat.files[cleanFileName2] = { postsCount: 0, totalChars: 0, totalCharsClean: 0, totalCharsNoSpaces: 0 };
+              }
+              cStat.files[cleanFileName2].postsCount++;
+              cStat.files[cleanFileName2].totalChars += bodyLen;
+              cStat.files[cleanFileName2].totalCharsClean += bodyLenClean;
+              cStat.files[cleanFileName2].totalCharsNoSpaces += bodyLenNoSpaces;
               cStat.authors[authorName] = (cStat.authors[authorName] || 0) + 1;
               if (dateStr) {
                 const parts = dateStr.split(",");
@@ -641,45 +681,296 @@ async function startServer() {
             });
           }
           if (!byAuthor[authorName]) {
-            byAuthor[authorName] = { postsCount: 0, totalChars: 0, longestPostLength: 0, longestPostContent: "" };
+            byAuthor[authorName] = {
+              postsCount: 0,
+              totalChars: 0,
+              totalCharsClean: 0,
+              totalCharsNoSpaces: 0,
+              longestPostLength: 0,
+              longestPostContent: ""
+            };
           }
           const aStat = byAuthor[authorName];
           aStat.postsCount++;
           aStat.totalChars += bodyLen;
+          aStat.totalCharsClean += bodyLenClean;
+          aStat.totalCharsNoSpaces += bodyLenNoSpaces;
           if (bodyLen > aStat.longestPostLength) {
             aStat.longestPostLength = bodyLen;
             aStat.longestPostContent = body;
           }
         });
         const cleanFileName = fileName.replace(/\.csv$/i, "");
-        byFile[cleanFileName] = { postsCount: filePostsCount, totalChars: fileTotalChars };
+        byFile[cleanFileName] = {
+          postsCount: filePostsCount,
+          totalChars: fileTotalChars,
+          totalCharsClean: fileTotalCharsClean,
+          totalCharsNoSpaces: fileTotalCharsNoSpaces
+        };
       });
-      const characterLeaderboard = Object.entries(byCharacter).map(([name, stat]) => ({
-        name,
-        postsCount: stat.postsCount,
-        totalChars: stat.totalChars,
-        averageLength: Math.round(stat.totalChars / (stat.postsCount || 1)),
-        longestPostLength: stat.longestPostLength,
-        longestPostContent: stat.longestPostContent,
-        longestPostDate: stat.longestPostDate,
-        longestPostFile: stat.longestPostFile,
-        files: stat.files,
-        hours: stat.hours,
-        dates: stat.dates,
-        authors: stat.authors
-      })).sort((a, b) => b.totalChars - a.totalChars);
+      const RUSSIAN_STOP_WORDS = [
+        "\u0438",
+        "\u0432",
+        "\u0432\u043E",
+        "\u043D\u0430",
+        "\u0441",
+        "\u0441\u043E",
+        "\u0443",
+        "\u043E",
+        "\u043E\u0431",
+        "\u043E\u0431\u043E",
+        "\u043A",
+        "\u043A\u043E",
+        "\u0438\u0437",
+        "\u043E\u0442",
+        "\u0434\u043E",
+        "\u0431\u0435\u0437",
+        "\u0447\u0435\u0440\u0435\u0437",
+        "\u043D\u0430\u0434",
+        "\u043F\u043E\u0434",
+        "\u043F\u0435\u0440\u0435\u0434",
+        "\u043F\u0440\u0438",
+        "\u0434\u043B\u044F",
+        "\u0437\u0430",
+        "\u043F\u043E",
+        "\u0430",
+        "\u043D\u043E",
+        "\u0434\u0430",
+        "\u0438\u043B\u0438",
+        "\u0447\u0442\u043E",
+        "\u043A\u0430\u043A",
+        "\u0447\u0442\u043E\u0431\u044B",
+        "\u0435\u0441\u043B\u0438",
+        "\u0445\u043E\u0442\u044F",
+        "\u043A\u043E\u0433\u0434\u0430",
+        "\u0447\u0442\u043E\u0431",
+        "\u0431\u0443\u0434\u0442\u043E",
+        "\u0441\u043B\u043E\u0432\u043D\u043E",
+        "\u0442\u043E",
+        "\u0436\u0435",
+        "\u043B\u0438",
+        "\u0431\u044B",
+        "\u0436\u0435",
+        "\u0431\u044B\u043B\u043E",
+        "\u0431\u044B\u043B\u0430",
+        "\u0431\u044B\u043B\u0438",
+        "\u0431\u044B\u043B",
+        "\u0431\u0443\u0434\u0435\u0442",
+        "\u0431\u0443\u0434\u0443\u0442",
+        "\u043C\u0435\u043D\u044F",
+        "\u043C\u043D\u0435",
+        "\u043C\u043D\u043E\u0439",
+        "\u043C\u043D\u043E\u044E",
+        "\u0442\u0435\u0431\u044F",
+        "\u0442\u0435\u0431\u0435",
+        "\u0442\u043E\u0431\u043E\u0439",
+        "\u0442\u043E\u0431\u043E\u044E",
+        "\u0435\u0433\u043E",
+        "\u043D\u0435\u0433\u043E",
+        "\u0435\u043C\u0443",
+        "\u043D\u0435\u043C\u0443",
+        "\u0438\u043C",
+        "\u043D\u0438\u043C",
+        "\u043D\u0435\u0439",
+        "\u0435\u044E",
+        "\u043D\u0435\u044E",
+        "\u0435\u0435",
+        "\u043D\u0435\u0435",
+        "\u0438\u0445",
+        "\u043D\u0438\u0445",
+        "\u0438\u043C\u0438",
+        "\u043D\u0438\u043C\u0438",
+        "\u0441\u0435\u0431\u044F",
+        "\u0441\u0435\u0431\u0435",
+        "\u0441\u043E\u0431\u043E\u0439",
+        "\u0441\u043E\u0431\u043E\u044E",
+        "\u043C\u043E\u0439",
+        "\u043C\u043E\u044F",
+        "\u043C\u043E\u0435",
+        "\u043C\u043E\u0438",
+        "\u0442\u0432\u043E\u0439",
+        "\u0442\u0432\u043E\u044F",
+        "\u0442\u0432\u043E\u0435",
+        "\u0442\u0432\u043E\u0438",
+        "\u043D\u0430\u0448",
+        "\u043D\u0430\u0448\u0430",
+        "\u043D\u0430\u0448\u0435",
+        "\u043D\u0430\u0448\u0438",
+        "\u0432\u0430\u0448",
+        "\u0432\u0430\u0448\u0430",
+        "\u0432\u0430\u0448\u0435",
+        "\u0432\u0430\u0448\u0438",
+        "\u0441\u0432\u043E\u0439",
+        "\u0441\u0432\u043E\u044F",
+        "\u0441\u0432\u043E\u0435",
+        "\u0441\u0432\u043E\u0438",
+        "\u043A\u0442\u043E",
+        "\u0447\u0442\u043E",
+        "\u043A\u0430\u043A\u043E\u0439",
+        "\u043A\u0430\u043A\u0430\u044F",
+        "\u043A\u0430\u043A\u043E\u0435",
+        "\u043A\u0430\u043A\u0438\u0435",
+        "\u0447\u0435\u0439",
+        "\u0447\u044C\u044F",
+        "\u0447\u044C\u0435",
+        "\u0447\u044C\u0438",
+        "\u044D\u0442\u043E\u0442",
+        "\u044D\u0442\u0430",
+        "\u044D\u0442\u043E",
+        "\u044D\u0442\u0438",
+        "\u0442\u043E\u0442",
+        "\u0442\u0430",
+        "\u0442\u0435",
+        "\u0442\u0430\u043A\u043E\u0439",
+        "\u0442\u0430\u043A\u0430\u044F",
+        "\u0442\u0430\u043A\u043E\u0435",
+        "\u0442\u0430\u043A\u0438\u0435",
+        "\u0432\u0435\u0441\u044C",
+        "\u0432\u0441\u044F",
+        "\u0432\u0441\u0435",
+        "\u0432\u0441\u0435\u0445",
+        "\u0432\u0441\u0435\u043C\u0443",
+        "\u0432\u0441\u0435\u043C\u0438",
+        "\u0432\u0441\u044F\u043A\u0438\u0439",
+        "\u043A\u0430\u0436\u0434\u044B\u0439",
+        "\u0441\u0430\u043C",
+        "\u0441\u0430\u043C\u044B\u0439",
+        "\u043E\u0434\u0438\u043D",
+        "\u043E\u0434\u043D\u0430",
+        "\u043E\u0434\u043D\u043E",
+        "\u043E\u0434\u043D\u0438",
+        "\u0434\u0440\u0443\u0433\u043E\u0439",
+        "\u0434\u0440\u0443\u0433\u0430\u044F",
+        "\u0434\u0440\u0443\u0433\u043E\u0435",
+        "\u0434\u0440\u0443\u0433\u0438\u0435",
+        "\u0438\u043D\u043E\u0439",
+        "\u043D\u0435\u043A\u043E\u0442\u043E\u0440\u044B\u0439",
+        "\u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E",
+        "\u043C\u043D\u043E\u0433\u043E",
+        "\u043C\u0430\u043B\u043E",
+        "\u043D\u0435",
+        "\u043D\u0438",
+        "\u043D\u0435\u0442",
+        "\u043B\u0438\u0448\u044C",
+        "\u0442\u043E\u043B\u044C\u043A\u043E",
+        "\u0442\u043E\u0436\u0435",
+        "\u0442\u0430\u043A\u0436\u0435",
+        "\u0435\u0449\u0435",
+        "\u0443\u0436\u0435",
+        "\u0442\u0430\u043A",
+        "\u0442\u0430\u043C",
+        "\u0442\u0443\u0442",
+        "\u0433\u0434\u0435",
+        "\u043A\u0443\u0434\u0430",
+        "\u043E\u0442\u043A\u0443\u0434\u0430",
+        "\u0437\u0430\u0447\u0435\u043C",
+        "\u043F\u043E\u0447\u0435\u043C\u0443",
+        "\u0442\u0435\u043F\u0435\u0440\u044C",
+        "\u0442\u043E\u0433\u0434\u0430",
+        "\u0441\u0435\u0439\u0447\u0430\u0441",
+        "\u043F\u043E\u0441\u043B\u0435",
+        "\u043F\u043E\u0442\u043E\u043C",
+        "\u043E\u043F\u044F\u0442\u044C",
+        "\u0441\u043D\u043E\u0432\u0430",
+        "\u0432\u0434\u0440\u0443\u0433",
+        "\u0435\u0434\u0432\u0430",
+        "\u0447\u0443\u0442\u044C",
+        "\u043F\u043E\u0447\u0442\u0438",
+        "\u043E\u0447\u0435\u043D\u044C",
+        "\u0441\u043E\u0432\u0441\u0435\u043C",
+        "\u0441\u043B\u0438\u0448\u043A\u043E\u043C",
+        "\u0432\u0435\u0441\u044C\u043C\u0430",
+        "\u043A\u0440\u0430\u0439\u043D\u0435",
+        "\u0440\u0430\u0437\u0432\u0435",
+        "\u043D\u0435\u0443\u0436\u0435\u043B\u0438"
+      ];
+      const RUSSIAN_PARASITE_WORDS = [
+        "\u043F\u0440\u043E\u0441\u0442\u043E",
+        "\u0442\u0438\u043F\u0430",
+        "\u0432\u043E\u043E\u0431\u0449\u0435",
+        "\u043A\u043E\u0440\u043E\u0447\u0435",
+        "\u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u043E",
+        "\u0437\u043D\u0430\u0447\u0438\u0442",
+        "\u0431\u043B\u0438\u043D",
+        "\u043D\u0430\u0432\u0435\u0440\u043D\u043E\u0435",
+        "\u0432\u0435\u0440\u043E\u044F\u0442\u043D\u043E",
+        "\u0431\u0443\u0434\u0442\u043E",
+        "\u0441\u043B\u043E\u0432\u043D\u043E",
+        "\u0432\u043E\u0442",
+        "\u043F\u043E\u043D\u0438\u043C\u0430\u0435\u0448\u044C",
+        "\u0441\u043B\u0443\u0448\u0430\u0439",
+        "\u0432\u0438\u0434\u0438\u043C\u043E",
+        "\u043A\u0430\u0436\u0435\u0442\u0441\u044F",
+        "\u043B\u0430\u0434\u043D\u043E",
+        "\u0442\u0430\u043A\u0436\u0435",
+        "\u0442\u043E\u0436\u0435",
+        "\u0445\u043E\u0442\u044F",
+        "\u0432\u0434\u0440\u0443\u0433",
+        "\u043F\u0440\u044F\u043C\u043E",
+        "\u043F\u0440\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u0438",
+        "\u0441\u0440\u0430\u0437\u0443",
+        "\u043A\u0430\u043A-\u0442\u043E",
+        "\u043F\u043E\u0447\u0435\u043C\u0443-\u0442\u043E",
+        "\u0437\u0430\u0447\u0435\u043C-\u0442\u043E",
+        "\u0433\u0434\u0435-\u0442\u043E",
+        "\u043A\u0442\u043E-\u0442\u043E",
+        "\u0447\u0442\u043E-\u0442\u043E",
+        "\u043A\u0430\u043A\u043E\u0439-\u0442\u043E",
+        "\u0442\u0430\u043A\u0438",
+        "\u0445\u043E\u0442\u044C",
+        "\u0440\u0430\u0437\u0432\u0435",
+        "\u043D\u0435\u0443\u0436\u0435\u043B\u0438",
+        "\u0434\u0430\u0436\u0435",
+        "\u0431\u0443\u043A\u0432\u0430\u043B\u044C\u043D\u043E",
+        "\u0440\u0435\u0430\u043B\u044C\u043D\u043E",
+        "\u0441\u0435\u0440\u044C\u0435\u0437\u043D\u043E",
+        "\u0442\u043E\u0447\u043D\u043E",
+        "\u0430\u0431\u0441\u043E\u043B\u044E\u0442\u043D\u043E",
+        "\u0444\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u0438",
+        "\u0447\u0438\u0441\u0442\u043E",
+        "\u043A\u043E\u043D\u043A\u0440\u0435\u0442\u043D\u043E",
+        "\u0442\u0438\u043F\u043E"
+      ];
+      const characterLeaderboard = Object.entries(byCharacter).map(([name, stat]) => {
+        return {
+          name,
+          postsCount: stat.postsCount,
+          totalChars: stat.totalChars,
+          totalCharsClean: stat.totalCharsClean,
+          totalCharsNoSpaces: stat.totalCharsNoSpaces,
+          averageLength: Math.round(stat.totalChars / (stat.postsCount || 1)),
+          averageLengthClean: Math.round(stat.totalCharsClean / (stat.postsCount || 1)),
+          averageLengthNoSpaces: Math.round(stat.totalCharsNoSpaces / (stat.postsCount || 1)),
+          longestPostLength: stat.longestPostLength,
+          longestPostContent: stat.longestPostContent,
+          longestPostDate: stat.longestPostDate,
+          longestPostFile: stat.longestPostFile,
+          files: stat.files,
+          hours: stat.hours,
+          dates: stat.dates,
+          authors: stat.authors
+        };
+      }).sort((a, b) => b.totalCharsNoSpaces - a.totalCharsNoSpaces);
       const authorLeaderboard = Object.entries(byAuthor).map(([name, stat]) => ({
         name,
         postsCount: stat.postsCount,
         totalChars: stat.totalChars,
+        totalCharsClean: stat.totalCharsClean,
+        totalCharsNoSpaces: stat.totalCharsNoSpaces,
         averageLength: Math.round(stat.totalChars / (stat.postsCount || 1)),
+        averageLengthClean: Math.round(stat.totalCharsClean / (stat.postsCount || 1)),
+        averageLengthNoSpaces: Math.round(stat.totalCharsNoSpaces / (stat.postsCount || 1)),
         longestPostLength: stat.longestPostLength,
         longestPostContent: stat.longestPostContent
-      })).sort((a, b) => b.totalChars - a.totalChars);
+      })).sort((a, b) => b.totalCharsNoSpaces - a.totalCharsNoSpaces);
       const payload = {
         totalPosts,
         totalCharacters,
+        totalCharactersClean,
+        totalCharactersNoSpaces,
         averagePostLength: totalPosts > 0 ? Math.round(totalCharacters / totalPosts) : 0,
+        averagePostLengthClean: totalPosts > 0 ? Math.round(totalCharactersClean / totalPosts) : 0,
+        averagePostLengthNoSpaces: totalPosts > 0 ? Math.round(totalCharactersNoSpaces / totalPosts) : 0,
         overallLongestPost,
         byDate,
         byDayOfWeek,
@@ -694,6 +985,728 @@ async function startServer() {
     } catch (err) {
       console.error("Failed to generate combined stats:", err);
       res.status(500).json({ error: err.message || "\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u0438 \u043F\u043E\u0434\u0441\u0447\u0435\u0442\u0435 \u043E\u0431\u0449\u0435\u0439 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0438" });
+    }
+  });
+  app.post("/api/github/character-advanced-stats", async (req, res) => {
+    try {
+      const { name, mappings } = req.body;
+      if (!name) {
+        return res.status(400).json({ error: "Character name is required" });
+      }
+      const customMappings = mappings || {};
+      const targetCharName = name.trim().toLowerCase();
+      const now = Date.now();
+      let csvFiles = [];
+      if (fileListCache && now - fileListCache.timestamp < CACHE_TTL) {
+        csvFiles = fileListCache.data;
+      } else {
+        const apiResponse = await fetch("https://api.github.com/repos/SaminCodes/raz_storage/contents", {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrono-Haven-App/1.0"
+          }
+        });
+        if (apiResponse.ok) {
+          const contents = await apiResponse.json();
+          csvFiles = contents.filter((file) => file.name.endsWith(".csv")).map((file) => ({
+            name: file.name,
+            path: file.path,
+            download_url: file.download_url
+          }));
+          fileListCache = { data: csvFiles, timestamp: now };
+        } else {
+          csvFiles = fileListCache ? fileListCache.data : [
+            { name: "\u043E\u0431\u0449\u0435\u0435.csv", path: "\u043E\u0431\u0449\u0435\u0435.csv", download_url: "https://raw.githubusercontent.com/SaminCodes/raz_storage/main/%D0%BE%D0%B1%D1%89%D0%B5%D0%B5.csv" }
+          ];
+        }
+      }
+      const allFilesData = [];
+      await Promise.all(csvFiles.map(async (file) => {
+        try {
+          const filePath = file.path;
+          let parsedData = [];
+          if (fileContentCache[filePath] && now - fileContentCache[filePath].timestamp < CACHE_TTL) {
+            parsedData = fileContentCache[filePath].data;
+          } else {
+            const downloadUrl = `https://raw.githubusercontent.com/SaminCodes/raz_storage/main/${encodeURIComponent(filePath)}`;
+            const response = await fetch(downloadUrl);
+            if (response.ok) {
+              const csvText = await response.text();
+              parsedData = parseCSV(csvText);
+              fileContentCache[filePath] = { data: parsedData, timestamp: now };
+            } else if (fileContentCache[filePath]) {
+              parsedData = fileContentCache[filePath].data;
+            }
+          }
+          if (parsedData && parsedData.length > 0) {
+            allFilesData.push({ fileName: file.name, posts: parsedData });
+          }
+        } catch (err) {
+          console.error(`Error loading file content for stats (${file.name}):`, err);
+        }
+      }));
+      let totalWords = 0;
+      const uniqueWordsSet = /* @__PURE__ */ new Set();
+      let sentenceCount = 0;
+      let exclamationCount = 0;
+      let questionCount = 0;
+      let dialogueLines = 0;
+      let totalLines = 0;
+      const responseTimes = [];
+      const allWords = {};
+      const allPhrases = {};
+      const dialoguePhrases = {};
+      const interactions = {};
+      allFilesData.forEach(({ fileName, posts }) => {
+        let lastPostInfo = null;
+        const sortedPosts = [...posts].sort((a, b) => parseDateToTimestamp(a.Date) - parseDateToTimestamp(b.Date));
+        const mergedPosts = [];
+        sortedPosts.forEach((post) => {
+          const rawContent = (post.Content || "").trim();
+          const parsed = parsePostContentOnServer(rawContent);
+          let hasCharacter = parsed.characterNames.length > 0;
+          if (!hasCharacter && post.Username && customMappings[post.Username]) {
+            hasCharacter = true;
+          }
+          if (hasCharacter) {
+            mergedPosts.push({ ...post });
+          } else {
+            if (mergedPosts.length > 0) {
+              const lastPost = mergedPosts[mergedPosts.length - 1];
+              lastPost.Content = (lastPost.Content || "") + "\n\n" + (post.Content || "");
+            } else {
+              mergedPosts.push({ ...post });
+            }
+          }
+        });
+        mergedPosts.forEach((post) => {
+          if (!isValidPostOnServer(post)) return;
+          const rawContent = post.Content || "";
+          const { body, characterNames: rawCharacterNames } = parsePostContentOnServer(rawContent);
+          let characterNames = [];
+          if (rawCharacterNames.length === 0 && post.Username && customMappings[post.Username]) {
+            characterNames = customMappings[post.Username].split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+          } else {
+            const tempNames = [];
+            (rawCharacterNames.length > 0 ? rawCharacterNames : []).forEach((name2) => {
+              const mapped = customMappings[name2];
+              if (mapped) {
+                mapped.split(/[,;]+/).map((s) => s.trim()).filter(Boolean).forEach((n) => tempNames.push(n));
+              } else {
+                tempNames.push(name2);
+              }
+            });
+            characterNames = tempNames;
+          }
+          characterNames = Array.from(new Set(characterNames));
+          const hasTargetChar = characterNames.some((cn) => cn.trim().toLowerCase() === targetCharName);
+          const dateStr = post.Date || "";
+          let currentTimestamp = null;
+          if (dateStr) {
+            currentTimestamp = parseDateToTimestamp(dateStr);
+          }
+          if (hasTargetChar) {
+            if (currentTimestamp !== null && lastPostInfo && lastPostInfo.timestamp !== null) {
+              const diffMs = currentTimestamp - lastPostInfo.timestamp;
+              if (diffMs > 0) {
+                const responseTimeMinutes = Math.floor(diffMs / 6e4);
+                if (responseTimeMinutes <= 2880) {
+                  responseTimes.push(responseTimeMinutes);
+                }
+              }
+            }
+            const getDialogueTexts = (textStr) => {
+              const linesList = textStr.split(/\r?\n/).map((l) => l.trim());
+              const dialogueLinesList = [];
+              for (const line of linesList) {
+                if (line.startsWith("\u2014") || line.startsWith("\u2013") || line.startsWith("-")) {
+                  const parts = line.split(/[\u2014\u2013]/);
+                  if (parts.length > 1) {
+                    const speech = parts[1]?.trim();
+                    if (speech) dialogueLinesList.push(speech);
+                    for (let i = 3; i < parts.length; i += 2) {
+                      const part = parts[i]?.trim();
+                      if (part) dialogueLinesList.push(part);
+                    }
+                  } else {
+                    const cleanLine = line.replace(/^[\u2014\u2013-]\s*/, "").trim();
+                    if (cleanLine) dialogueLinesList.push(cleanLine);
+                  }
+                }
+                const quoteRegex = /[«“"']([^»”"']+)[»”"']/g;
+                let match;
+                while ((match = quoteRegex.exec(line)) !== null) {
+                  const speech = match[1].trim();
+                  if (speech.length > 3) {
+                    dialogueLinesList.push(speech);
+                  }
+                }
+              }
+              return dialogueLinesList;
+            };
+            const getDashedDialogueTexts = (textStr) => {
+              const linesList = textStr.split(/\r?\n/).map((l) => l.trim());
+              const dialogueLinesList = [];
+              for (const line of linesList) {
+                if (line.startsWith("\u2014") || line.startsWith("\u2013") || line.startsWith("-")) {
+                  const parts = line.split(/[\u2014\u2013-]/);
+                  if (parts.length > 1) {
+                    const speech = parts[1]?.trim();
+                    if (speech) dialogueLinesList.push(speech);
+                    for (let i = 3; i < parts.length; i += 2) {
+                      const part = parts[i]?.trim();
+                      if (part) dialogueLinesList.push(part);
+                    }
+                  } else {
+                    const cleanLine = line.replace(/^[\u2014\u2013-]\s*/, "").trim();
+                    if (cleanLine) dialogueLinesList.push(cleanLine);
+                  }
+                }
+              }
+              return dialogueLinesList;
+            };
+            const words = body.toLowerCase().match(/[а-яёa-z0-9-]+/g) || [];
+            totalWords += words.length;
+            words.forEach((w) => {
+              if (w.length > 2) {
+                uniqueWordsSet.add(w);
+                allWords[w] = (allWords[w] || 0) + 1;
+              }
+            });
+            for (let i = 0; i < words.length - 1; i++) {
+              const w1 = words[i];
+              const w2 = words[i + 1];
+              if (w1.length >= 3 && w2.length >= 3) {
+                const phrase = `${w1} ${w2}`;
+                allPhrases[phrase] = (allPhrases[phrase] || 0) + 1;
+              }
+            }
+            for (let i = 0; i < words.length - 2; i++) {
+              const w1 = words[i];
+              const w2 = words[i + 1];
+              const w3 = words[i + 2];
+              if (w1.length >= 3 && w2.length >= 2 && w3.length >= 3) {
+                const phrase = `${w1} ${w2} ${w3}`;
+                allPhrases[phrase] = (allPhrases[phrase] || 0) + 1;
+              }
+            }
+            const dialogueTexts = getDashedDialogueTexts(body);
+            dialogueTexts.forEach((text) => {
+              const dWords = text.toLowerCase().match(/[а-яёa-z0-9-]+/g) || [];
+              for (let i = 0; i < dWords.length - 1; i++) {
+                const w1 = dWords[i];
+                const w2 = dWords[i + 1];
+                if (w1.length >= 3 && w2.length >= 3) {
+                  const phrase = `${w1} ${w2}`;
+                  dialoguePhrases[phrase] = (dialoguePhrases[phrase] || 0) + 1;
+                }
+              }
+              for (let i = 0; i < dWords.length - 2; i++) {
+                const w1 = dWords[i];
+                const w2 = dWords[i + 1];
+                const w3 = dWords[i + 2];
+                if (w1.length >= 3 && w2.length >= 2 && w3.length >= 3) {
+                  const phrase = `${w1} ${w2} ${w3}`;
+                  dialoguePhrases[phrase] = (dialoguePhrases[phrase] || 0) + 1;
+                }
+              }
+            });
+            const sentences = body.split(/[.!?]+(?:\s+|$)/).map((s) => s.replace(/[*_#\-—~()]+/g, "").trim()).filter((s) => {
+              const wordsInSec = s.match(/[а-яёa-z0-9-]+/gi) || [];
+              return wordsInSec.length >= 2;
+            });
+            sentenceCount += sentences.length;
+            exclamationCount += (body.match(/!/g) || []).length;
+            questionCount += (body.match(/\?/g) || []).length;
+            const bodyLines = body.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+            totalLines += bodyLines.length;
+            dialogueLines += bodyLines.filter((l) => l.startsWith("\u2014") || l.startsWith("\u2013") || l.startsWith("-")).length;
+            if (lastPostInfo && lastPostInfo.characterNames.length > 0) {
+              lastPostInfo.characterNames.forEach((prevChar) => {
+                if (prevChar.toLowerCase() !== targetCharName) {
+                  interactions[prevChar] = (interactions[prevChar] || 0) + 1;
+                }
+              });
+            }
+          }
+          if (characterNames.length > 0) {
+            lastPostInfo = {
+              characterNames,
+              timestamp: currentTimestamp
+            };
+          }
+        });
+      });
+      const avgRespTime = responseTimes.length > 0 ? Math.round(responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length) : null;
+      const RUSSIAN_STOP_WORDS = [
+        "\u0438",
+        "\u0432",
+        "\u0432\u043E",
+        "\u043D\u0430",
+        "\u0441",
+        "\u0441\u043E",
+        "\u0443",
+        "\u043E",
+        "\u043E\u0431",
+        "\u043E\u0431\u043E",
+        "\u043A",
+        "\u043A\u043E",
+        "\u0438\u0437",
+        "\u043E\u0442",
+        "\u0434\u043E",
+        "\u0431\u0435\u0437",
+        "\u0447\u0435\u0440\u0435\u0437",
+        "\u043D\u0430\u0434",
+        "\u043F\u043E\u0434",
+        "\u043F\u0435\u0440\u0435\u0434",
+        "\u043F\u0440\u0438",
+        "\u0434\u043B\u044F",
+        "\u0437\u0430",
+        "\u043F\u043E",
+        "\u0430",
+        "\u043D\u043E",
+        "\u0434\u0430",
+        "\u0438\u043B\u0438",
+        "\u0447\u0442\u043E",
+        "\u043A\u0430\u043A",
+        "\u0447\u0442\u043E\u0431\u044B",
+        "\u0435\u0441\u043B\u0438",
+        "\u0445\u043E\u0442\u044F",
+        "\u043A\u043E\u0433\u0434\u0430",
+        "\u0447\u0442\u043E\u0431",
+        "\u0431\u0443\u0434\u0442\u043E",
+        "\u0441\u043B\u043E\u0432\u043D\u043E",
+        "\u0442\u043E",
+        "\u0436\u0435",
+        "\u043B\u0438",
+        "\u0431\u044B",
+        "\u0436\u0435",
+        "\u0431\u044B\u043B\u043E",
+        "\u0431\u044B\u043B\u0430",
+        "\u0431\u044B\u043B\u0438",
+        "\u0431\u044B\u043B",
+        "\u0431\u0443\u0434\u0435\u0442",
+        "\u0431\u0443\u0434\u0443\u0442",
+        "\u043C\u0435\u043D\u044F",
+        "\u043C\u043D\u0435",
+        "\u043C\u043D\u043E\u0439",
+        "\u043C\u043D\u043E\u044E",
+        "\u0442\u0435\u0431\u044F",
+        "\u0442\u0435\u0431\u0435",
+        "\u0442\u043E\u0431\u043E\u0439",
+        "\u0442\u043E\u0431\u043E\u044E",
+        "\u0435\u0433\u043E",
+        "\u043D\u0435\u0433\u043E",
+        "\u0435\u043C\u0443",
+        "\u043D\u0435\u043C\u0443",
+        "\u0438\u043C",
+        "\u043D\u0438\u043C",
+        "\u043D\u0435\u0439",
+        "\u0435\u044E",
+        "\u043D\u0435\u044E",
+        "\u0435\u0435",
+        "\u043D\u0435\u0435",
+        "\u0438\u0445",
+        "\u043D\u0438\u0445",
+        "\u0438\u043C\u0438",
+        "\u043D\u0438\u043C\u0438",
+        "\u0441\u0435\u0431\u044F",
+        "\u0441\u0435\u0431\u0435",
+        "\u0441\u043E\u0431\u043E\u0439",
+        "\u0441\u043E\u0431\u043E\u044E",
+        "\u043C\u043E\u0439",
+        "\u043C\u043E\u044F",
+        "\u043C\u043E\u0435",
+        "\u043C\u043E\u0438",
+        "\u0442\u0432\u043E\u0439",
+        "\u0442\u0432\u043E\u044F",
+        "\u0442\u0432\u043E\u0435",
+        "\u0442\u0432\u043E\u0438",
+        "\u043D\u0430\u0448",
+        "\u043D\u0430\u0448\u0430",
+        "\u043D\u0430\u0448\u0435",
+        "\u043D\u0430\u0448\u0438",
+        "\u0432\u0430\u0448",
+        "\u0432\u0430\u0448\u0430",
+        "\u0432\u0430\u0448\u0435",
+        "\u0432\u0430\u0448\u0438",
+        "\u0441\u0432\u043E\u0439",
+        "\u0441\u0432\u043E\u044F",
+        "\u0441\u0432\u043E\u0435",
+        "\u0441\u0432\u043E\u0438",
+        "\u043A\u0442\u043E",
+        "\u0447\u0442\u043E",
+        "\u043A\u0430\u043A\u043E\u0439",
+        "\u043A\u0430\u043A\u0430\u044F",
+        "\u043A\u0430\u043A\u043E\u0435",
+        "\u043A\u0430\u043A\u0438\u0435",
+        "\u0447\u0435\u0439",
+        "\u0447\u044C\u044F",
+        "\u0447\u044C\u0435",
+        "\u0447\u044C\u0438",
+        "\u044D\u0442\u043E\u0442",
+        "\u044D\u0442\u0430",
+        "\u044D\u0442\u043E",
+        "\u044D\u0442\u0438",
+        "\u0442\u043E\u0442",
+        "\u0442\u0430",
+        "\u0442\u0435",
+        "\u0442\u0430\u043A\u043E\u0439",
+        "\u0442\u0430\u043A\u0430\u044F",
+        "\u0442\u0430\u043A\u043E\u0435",
+        "\u0442\u0430\u043A\u0438\u0435",
+        "\u0432\u0435\u0441\u044C",
+        "\u0432\u0441\u044F",
+        "\u0432\u0441\u0435",
+        "\u0432\u0441\u0435\u0445",
+        "\u0432\u0441\u0435\u043C\u0443",
+        "\u0432\u0441\u0435\u043C\u0438",
+        "\u0432\u0441\u044F\u043A\u0438\u0439",
+        "\u043A\u0430\u0436\u0434\u044B\u0439",
+        "\u0441\u0430\u043C",
+        "\u0441\u0430\u043C\u044B\u0439",
+        "\u043E\u0434\u0438\u043D",
+        "\u043E\u0434\u043D\u0430",
+        "\u043E\u0434\u043D\u043E",
+        "\u043E\u0434\u043D\u0438",
+        "\u0434\u0440\u0443\u0433\u043E\u0439",
+        "\u0434\u0440\u0443\u0433\u0430\u044F",
+        "\u0434\u0440\u0443\u0433\u043E\u0435",
+        "\u0434\u0440\u0443\u0433\u0438\u0435",
+        "\u0438\u043D\u043E\u0439",
+        "\u043D\u0435\u043A\u043E\u0442\u043E\u0440\u044B\u0439",
+        "\u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E",
+        "\u043C\u043D\u043E\u0433\u043E",
+        "\u043C\u0430\u043B\u043E",
+        "\u043D\u0435",
+        "\u043D\u0438",
+        "\u043D\u0435\u0442",
+        "\u043B\u0438\u0448\u044C",
+        "\u0442\u043E\u043B\u044C\u043A\u043E",
+        "\u0442\u043E\u0436\u0435",
+        "\u0442\u0430\u043A\u0436\u0435",
+        "\u0435\u0449\u0435",
+        "\u0443\u0436\u0435",
+        "\u0442\u0430\u043A",
+        "\u0442\u0430\u043C",
+        "\u0442\u0443\u0442",
+        "\u0433\u0434\u0435",
+        "\u043A\u0443\u0434\u0430",
+        "\u043E\u0442\u043A\u0443\u0434\u0430",
+        "\u0437\u0430\u0447\u0435\u043C",
+        "\u043F\u043E\u0447\u0435\u043C\u0443",
+        "\u0442\u0435\u043F\u0435\u0440\u044C",
+        "\u0442\u043E\u0433\u0434\u0430",
+        "\u0441\u0435\u0439\u0447\u0430\u0441",
+        "\u043F\u043E\u0441\u043B\u0435",
+        "\u043F\u043E\u0442\u043E\u043C",
+        "\u043E\u043F\u044F\u0442\u044C",
+        "\u0441\u043D\u043E\u0432\u0430",
+        "\u0432\u0434\u0440\u0443\u0433",
+        "\u0435\u0434\u0432\u0430",
+        "\u0447\u0443\u0442\u044C",
+        "\u043F\u043E\u0447\u0442\u0438",
+        "\u043E\u0447\u0435\u043D\u044C",
+        "\u0441\u043E\u0432\u0441\u0435\u043C",
+        "\u0441\u043B\u0438\u0448\u043A\u043E\u043C",
+        "\u0432\u0435\u0441\u044C\u043C\u0430",
+        "\u043A\u0440\u0430\u0439\u043D\u0435",
+        "\u0440\u0430\u0437\u0432\u0435",
+        "\u043D\u0435\u0443\u0436\u0435\u043B\u0438"
+      ];
+      const EXCLUDE_WORDS = /* @__PURE__ */ new Set([
+        "\u043F\u0440\u043E\u0441\u0442\u043E",
+        "\u0432\u043E\u0442",
+        "\u043F\u043E\u043A\u0430",
+        "\u0447\u0442\u043E",
+        "\u0442\u0438\u043F\u0430",
+        "\u0432\u043E\u043E\u0431\u0449\u0435",
+        "\u043A\u043E\u0440\u043E\u0447\u0435",
+        "\u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u043E",
+        "\u0437\u043D\u0430\u0447\u0438\u0442",
+        "\u0431\u043B\u0438\u043D",
+        "\u043D\u0430\u0432\u0435\u0440\u043D\u043E\u0435",
+        "\u0432\u0435\u0440\u043E\u044F\u0442\u043D\u043E",
+        "\u0431\u0443\u0434\u0442\u043E",
+        "\u0441\u043B\u043E\u0432\u043D\u043E",
+        "\u043F\u043E\u043D\u0438\u043C\u0430\u0435\u0448\u044C",
+        "\u0441\u043B\u0443\u0448\u0430\u0439",
+        "\u0432\u0438\u0434\u0438\u043C\u043E",
+        "\u043A\u0430\u0436\u0435\u0442\u0441\u044F",
+        "\u043B\u0430\u0434\u043D\u043E",
+        "\u0442\u0430\u043A\u0436\u0435",
+        "\u0442\u043E\u0436\u0435",
+        "\u0445\u043E\u0442\u044F",
+        "\u0432\u0434\u0440\u0443\u0433",
+        "\u043F\u0440\u044F\u043C\u043E",
+        "\u043F\u0440\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u0438",
+        "\u0441\u0440\u0430\u0437\u0443",
+        "\u043A\u0430\u043A-\u0442\u043E",
+        "\u043F\u043E\u0447\u0435\u043C\u0443-\u0442\u043E",
+        "\u0437\u0430\u0447\u0435\u043C-\u0442\u043E",
+        "\u0433\u0434\u0435-\u0442\u043E",
+        "\u043A\u0442\u043E-\u0442\u043E",
+        "\u0447\u0442\u043E-\u0442\u043E",
+        "\u043A\u0430\u043A\u043E\u0439-\u0442\u043E",
+        "\u0442\u0430\u043A\u0438",
+        "\u0445\u043E\u0442\u044C",
+        "\u0440\u0430\u0437\u0432\u0435",
+        "\u043D\u0435\u0443\u0436\u0435\u043B\u0438",
+        "\u0434\u0430\u0436\u0435",
+        "\u0431\u0443\u043A\u0432\u0430\u043B\u044C\u043D\u043E",
+        "\u0440\u0435\u0430\u043B\u044C\u043D\u043E",
+        "\u0441\u0435\u0440\u044C\u0435\u0437\u043D\u043E",
+        "\u0442\u043E\u0447\u043D\u043E",
+        "\u0430\u0431\u0441\u043E\u043B\u044E\u0442\u043D\u043E",
+        "\u0444\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u0438",
+        "\u0447\u0438\u0441\u0442\u043E",
+        "\u043A\u043E\u043D\u043A\u0440\u0435\u0442\u043D\u043E",
+        "\u0442\u0438\u043F\u043E",
+        "\u0442\u0430\u043C",
+        "\u0442\u0443\u0442",
+        "\u0433\u0434\u0435",
+        "\u043A\u0443\u0434\u0430",
+        "\u043E\u0442\u043A\u0443\u0434\u0430",
+        "\u0437\u0430\u0447\u0435\u043C",
+        "\u043F\u043E\u0447\u0435\u043C\u0443",
+        "\u0442\u0435\u043F\u0435\u0440\u044C",
+        "\u0442\u043E\u0433\u0434\u0430",
+        "\u0441\u0435\u0439\u0447\u0430\u0441",
+        "\u043F\u043E\u0441\u043B\u0435",
+        "\u043F\u043E\u0442\u043E\u043C",
+        "\u043E\u043F\u044F\u0442\u044C",
+        "\u0441\u043D\u043E\u0432\u0430",
+        "\u0435\u0434\u0432\u0430",
+        "\u0447\u0443\u0442\u044C",
+        "\u043F\u043E\u0447\u0442\u0438",
+        "\u043E\u0447\u0435\u043D\u044C",
+        "\u0441\u043E\u0432\u0441\u0435\u043C",
+        "\u0441\u043B\u0438\u0448\u043A\u043E\u043C",
+        "\u0432\u0435\u0441\u044C\u043C\u0430",
+        "\u043A\u0440\u0430\u0439\u043D\u0435",
+        "\u0438",
+        "\u0432",
+        "\u0432\u043E",
+        "\u043D\u0430",
+        "\u0441",
+        "\u0441\u043E",
+        "\u0443",
+        "\u043E",
+        "\u043E\u0431",
+        "\u043E\u0431\u043E",
+        "\u043A",
+        "\u043A\u043E",
+        "\u0438\u0437",
+        "\u043E\u0442",
+        "\u0434\u043E",
+        "\u0431\u0435\u0437",
+        "\u0447\u0435\u0440\u0435\u0437",
+        "\u043D\u0430\u0434",
+        "\u043F\u043E\u0434",
+        "\u043F\u0435\u0440\u0435\u0434",
+        "\u043F\u0440\u0438",
+        "\u0434\u043B\u044F",
+        "\u0437\u0430",
+        "\u043F\u043E",
+        "\u0430",
+        "\u043D\u043E",
+        "\u0434\u0430",
+        "\u0438\u043B\u0438",
+        "\u0447\u0442\u043E\u0431\u044B",
+        "\u0435\u0441\u043B\u0438",
+        "\u0447\u0442\u043E\u0431",
+        "\u0442\u043E",
+        "\u0436\u0435",
+        "\u043B\u0438",
+        "\u0431\u044B",
+        "\u0431\u044B\u043B\u043E",
+        "\u0431\u044B\u043B\u0430",
+        "\u0431\u044B\u043B\u0438",
+        "\u0431\u044B\u043B",
+        "\u0431\u0443\u0434\u0435\u0442",
+        "\u0431\u0443\u0434\u0443\u0442",
+        "\u043C\u0435\u043D\u044F",
+        "\u043C\u043D\u0435",
+        "\u043C\u043D\u043E\u0439",
+        "\u043C\u043D\u043E\u044E",
+        "\u0442\u0435\u0431\u044F",
+        "\u0442\u0435\u0431\u0435",
+        "\u0442\u043E\u0431\u043E\u0439",
+        "\u0442\u043E\u0431\u043E\u044E",
+        "\u0435\u0433\u043E",
+        "\u043D\u0435\u0433\u043E",
+        "\u0435\u043C\u0443",
+        "\u043D\u0435\u043C\u0443",
+        "\u0438\u043C",
+        "\u043D\u0438\u043C",
+        "\u043D\u0435\u0439",
+        "\u0435\u044E",
+        "\u043D\u0435\u044E",
+        "\u0435\u0435",
+        "\u043D\u0435\u0435",
+        "\u0438\u0445",
+        "\u043D\u0438\u0445",
+        "\u0438\u043C\u0438",
+        "\u043D\u0438\u043C\u0438",
+        "\u0441\u0435\u0431\u044F",
+        "\u0441\u0435\u0431\u0435",
+        "\u0441\u043E\u0431\u043E\u0439",
+        "\u0441\u043E\u0431\u043E\u044E",
+        "\u043C\u043E\u0439",
+        "\u043C\u043E\u044F",
+        "\u043C\u043E\u0435",
+        "\u043C\u043E\u0438",
+        "\u0442\u0432\u043E\u0439",
+        "\u0442\u0432\u043E\u044F",
+        "\u0442\u0432\u043E\u0435",
+        "\u0442\u0432\u043E\u0438",
+        "\u043D\u0430\u0448",
+        "\u043D\u0430\u0448\u0430",
+        "\u043D\u0430\u0448\u0435",
+        "\u043D\u0430\u0448\u0438",
+        "\u0432\u0430\u0448",
+        "\u0432\u0430\u0448\u0430",
+        "\u0432\u0430\u0448\u0435",
+        "\u0432\u0430\u0448\u0438",
+        "\u0441\u0432\u043E\u0439",
+        "\u0441\u0432\u043E\u044F",
+        "\u0441\u0432\u043E\u0435",
+        "\u0441\u0432\u043E\u0438",
+        "\u043A\u0442\u043E",
+        "\u043A\u0430\u043A\u043E\u0439",
+        "\u043A\u0430\u043A\u0430\u044F",
+        "\u043A\u0430\u043A\u043E\u0435",
+        "\u043A\u0430\u043A\u0438\u0435",
+        "\u0447\u0435\u0439",
+        "\u0447\u044C\u044F",
+        "\u0447\u044C\u0435",
+        "\u0447\u044C\u0438",
+        "\u044D\u0442\u043E\u0442",
+        "\u044D\u0442\u0430",
+        "\u044D\u0442\u043E",
+        "\u044D\u0442\u0438",
+        "\u0442\u043E\u0442",
+        "\u0442\u0430",
+        "\u0442\u0435",
+        "\u0442\u0430\u043A\u043E\u0439",
+        "\u0442\u0430\u043A\u0430\u044F",
+        "\u0442\u0430\u043A\u043E\u0435",
+        "\u0442\u0430\u043A\u0438\u0435",
+        "\u0432\u0435\u0441\u044C",
+        "\u0432\u0441\u044F",
+        "\u0432\u0441\u0435",
+        "\u0432\u0441\u0435\u0445",
+        "\u0432\u0441\u0435\u043C\u0443",
+        "\u0432\u0441\u0435\u043C\u0438",
+        "\u0432\u0441\u044F\u043A\u0438\u0439",
+        "\u043A\u0430\u0436\u0434\u044B\u0439",
+        "\u0441\u0430\u043C",
+        "\u0441\u0430\u043C\u044B\u0439",
+        "\u043E\u0434\u0438\u043D",
+        "\u043E\u0434\u043D\u0430",
+        "\u043E\u0434\u043D\u043E",
+        "\u043E\u0434\u043D\u0438",
+        "\u0434\u0440\u0443\u0433\u043E\u0439",
+        "\u0434\u0440\u0443\u0433\u0430\u044F",
+        "\u0434\u0440\u0443\u0433\u043E\u0435",
+        "\u0434\u0440\u0443\u0433\u0438\u0435",
+        "\u0438\u043D\u043E\u0439",
+        "\u043D\u0435\u043A\u043E\u0442\u043E\u0440\u044B\u0439",
+        "\u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E",
+        "m\u043D\u043E\u0433\u043E",
+        "\u043C\u0430\u043B\u043E",
+        "\u043D\u0435",
+        "\u043D\u0438",
+        "\u043D\u0435\u0442",
+        "\u043B\u0438\u0448\u044C",
+        "\u0442\u043E\u043B\u044C\u043A\u043E",
+        "\u0435\u0449\u0435",
+        "\u0443\u0436\u0435",
+        "\u0442\u0430\u043A",
+        "\u043A\u0430\u043A",
+        "\u0431\u044B\u0442\u044C",
+        "\u0431\u044B\u043B",
+        "\u0431\u044B\u043B\u0430",
+        "\u043C\u043E\u0436\u0435\u0442",
+        "\u043C\u043E\u0433\u0443",
+        "\u043C\u043E\u0436\u0435\u0448\u044C",
+        "\u0445\u043E\u0447\u0435\u0442",
+        "\u0445\u043E\u0447\u0443",
+        "\u0431\u0443\u0434\u0435\u043C",
+        "\u0431\u0443\u0434\u0435\u0448\u044C",
+        "\u0431\u0443\u0434\u0443",
+        "\u0435\u0441\u0442\u044C",
+        "\u043D\u0435\u0442",
+        "\u0432\u0441\u0435-\u0442\u0430\u043A\u0438",
+        "\u0432\u0441\u0451-\u0442\u0430\u043A\u0438",
+        "\u0432\u0441\u0451",
+        "\u0432\u0441\u0435",
+        "\u044D\u0442\u043E",
+        "\u0442\u043E",
+        "\u0434\u0430",
+        "\u043D\u0435\u0442",
+        "\u043D\u0443",
+        "\u0434\u0430\u0436\u0435",
+        "\u0436\u0435",
+        "\u043B\u0438",
+        "\u0431\u044B",
+        "\u0445\u043E\u0442\u044F",
+        "\u0442\u043E\u0436\u0435",
+        "\u043F\u043E\u044D\u0442\u043E\u043C\u0443",
+        "\u043A\u043E\u0433\u0434\u0430",
+        "\u0442\u043E\u0433\u0434\u0430",
+        "\u0447\u0442\u043E\u0431\u044B",
+        "\u0432\u0435\u0434\u044C",
+        "\u0440\u0430\u0437",
+        "\u0434\u0432\u0430",
+        "\u0442\u0440\u0438",
+        "\u0441\u0432\u043E\u0438\u0445",
+        "\u0441\u0432\u043E\u0438",
+        "\u0441\u043A\u043E\u0440\u0435\u0435",
+        "\u0432\u0441\u0435\u0433\u043E"
+      ]);
+      const phraseCandidates = Object.entries(dialoguePhrases).filter(([phrase]) => {
+        const words = phrase.split(" ");
+        return words.every((word) => word.length >= 2 && !EXCLUDE_WORDS.has(word) && !RUSSIAN_STOP_WORDS.includes(word));
+      }).sort((a, b) => b[1] - a[1]);
+      let parasiteWords = phraseCandidates.slice(0, 3).map(([phrase]) => phrase);
+      if (parasiteWords.length < 3) {
+        const topSingleWords = Object.entries(allWords).filter(([word]) => word.length >= 3 && !EXCLUDE_WORDS.has(word) && !RUSSIAN_STOP_WORDS.includes(word)).sort((a, b) => b[1] - a[1]).map(([word]) => word);
+        for (const sw of topSingleWords) {
+          if (parasiteWords.length >= 3) break;
+          if (!parasiteWords.includes(sw)) {
+            parasiteWords.push(sw);
+          }
+        }
+      }
+      if (parasiteWords.length < 3) {
+        const relaxedPhrases = Object.entries(dialoguePhrases).filter(([phrase]) => {
+          const words = phrase.split(" ");
+          return words.every((word) => !RUSSIAN_STOP_WORDS.includes(word) && !EXCLUDE_WORDS.has(word));
+        }).sort((a, b) => b[1] - a[1]).map(([phrase]) => phrase);
+        for (const rp of relaxedPhrases) {
+          if (parasiteWords.length >= 3) break;
+          if (!parasiteWords.includes(rp)) {
+            parasiteWords.push(rp);
+          }
+        }
+      }
+      const signaturePhrase = phraseCandidates[0] ? phraseCandidates[0][0] : "";
+      res.json({
+        totalWords,
+        vocabularySize: uniqueWordsSet.size,
+        sentenceCount,
+        exclamationCount,
+        questionCount,
+        dialogueLines,
+        totalLines,
+        averageResponseTime: avgRespTime,
+        parasiteWords,
+        signaturePhrase,
+        interactions
+      });
+    } catch (err) {
+      console.error("Failed to generate advanced character stats:", err);
+      res.status(500).json({ error: err.message || "\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u0438 \u043F\u043E\u0434\u0441\u0447\u0435\u0442\u0435 \u0434\u0435\u0442\u0430\u043B\u044C\u043D\u043E\u0439 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0438" });
     }
   });
   app.post("/api/gemini/search-grounding", async (req, res) => {
