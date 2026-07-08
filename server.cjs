@@ -1833,6 +1833,29 @@ async function startServer() {
       }
     }
   });
+  app.get("/api/proxy-image", async (req, res) => {
+    try {
+      const imageUrl = req.query.url;
+      if (!imageUrl || typeof imageUrl !== "string") {
+        return res.status(400).json({ error: "No URL provided" });
+      }
+      const response = await fetch(imageUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch image: ${response.statusText}`);
+      }
+      const contentType = response.headers.get("content-type");
+      if (contentType) {
+        res.setHeader("Content-Type", contentType);
+      }
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cache-Control", "public, max-age=31536000");
+      const buffer = await response.arrayBuffer();
+      res.send(Buffer.from(buffer));
+    } catch (err) {
+      console.error("Image proxy error:", err);
+      res.status(500).json({ error: "Failed to proxy image" });
+    }
+  });
   if (process.env.NODE_ENV !== "production") {
     const vite = await (0, import_vite.createServer)({
       server: { middlewareMode: true },
