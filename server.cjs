@@ -25,12 +25,267 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var import_express = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
 var import_fs = __toESM(require("fs"), 1);
+var import_http = require("http");
+var import_socket = require("socket.io");
 var import_vite = require("vite");
 var import_cors = __toESM(require("cors"), 1);
 var import_genai = require("@google/genai");
 async function startServer() {
   const app = (0, import_express.default)();
+  const httpServer = (0, import_http.createServer)(app);
+  const io = new import_socket.Server(httpServer, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST"]
+    }
+  });
   const PORT = 3e3;
+  const games = /* @__PURE__ */ new Map();
+  const socketMetadata = /* @__PURE__ */ new Map();
+  const GAME_TIMEOUT_MS = 5 * 60 * 1e3;
+  const matchmakingQueue = [];
+  const getEnrichedGamesList = () => {
+    const now = Date.now();
+    const validGames = [];
+    for (const [gameId, game] of games.entries()) {
+      if (game.status === "waiting" && now - (game.createdAt || 0) > GAME_TIMEOUT_MS) {
+        games.delete(gameId);
+        continue;
+      }
+      validGames.push(game);
+    }
+    return validGames.map((game) => {
+      const room = io.sockets.adapter.rooms.get(game.id);
+      const onlineCount = room ? room.size : 0;
+      const onlineNames = [];
+      if (room) {
+        for (const socketId of room) {
+          const meta = socketMetadata.get(socketId);
+          if (meta && meta.userName) {
+            onlineNames.push(meta.userName);
+          }
+        }
+      }
+      let enrichedGame = {
+        ...game,
+        onlineCount,
+        onlineNames: [...new Set(onlineNames)],
+        guestId: game.guestId || "",
+        guestName: game.guestName || "",
+        guestAvatar: game.guestAvatar || "",
+        hostId: game.hostId || "",
+        hostName: game.hostName || "",
+        hostAvatar: game.hostAvatar || "",
+        status: game.status || "waiting"
+      };
+      if (game.state?.player2?.uid && !game.guestId) {
+        enrichedGame.guestId = game.state.player2.uid;
+      }
+      return enrichedGame;
+    });
+  };
+  const broadcastGamesList = () => {
+    try {
+      const enrichedList = getEnrichedGamesList();
+      io.sockets.emit("games_list", enrichedList);
+    } catch (e) {
+      console.error(`[\u2717 Server] Error broadcasting games list:`, e.message);
+    }
+  };
+  io.on("connection", (socket) => {
+    socket.on("get_games_list", () => {
+      try {
+        const list = getEnrichedGamesList();
+        socket.emit("games_list", list);
+      } catch (e) {
+        console.error(`[\u2717 Server] Error sending games list:`, e.message);
+      }
+    });
+    socket.on("get_game", (sessionId) => {
+      try {
+        const game = games.get(sessionId);
+        if (game) {
+          socket.emit("game_sync", game);
+        } else {
+          socket.emit("game_sync", null);
+        }
+      } catch (e) {
+        console.error(`[\u2717 Server] Error getting game ${sessionId}:`, e.message);
+      }
+    });
+    socket.on("create_game", (session) => {
+      try {
+        if (!session || !session.id) return;
+        session.createdAt = Date.now();
+        games.set(session.id, session);
+        socketMetadata.set(socket.id, { userId: session.hostId, userName: session.hostName, sessionId: session.id });
+        socket.join(session.id);
+        broadcastGamesList();
+        socket.emit("game_sync", session);
+      } catch (e) {
+        console.error(`[\u2717 Server] Error creating game:`, e.message);
+      }
+    });
+    socket.on("join_game", ({ sessionId, updates }) => {
+      try {
+        const game = games.get(sessionId);
+        if (!game) {
+          socket.emit("error", { message: "Game not found" });
+          return;
+        }
+        if (updates) {
+          if (updates.state) {
+            const mergedState = { ...game.state };
+            if (updates.state.player1) mergedState.player1 = { ...mergedState.player1, ...updates.state.player1 };
+            if (updates.state.player2) mergedState.player2 = { ...mergedState.player2, ...updates.state.player2 };
+            updates.state = mergedState;
+          }
+          Object.assign(game, updates);
+          games.set(sessionId, game);
+        }
+        socketMetadata.set(socket.id, {
+          userId: updates?.guestId || game.guestId || "spectator",
+          userName: updates?.guestName || game.guestName || "\u041D\u0430\u0431\u043B\u044E\u0434\u0430\u0442\u0435\u043B\u044C",
+          sessionId
+        });
+        socket.join(sessionId);
+        io.to(sessionId).emit("game_sync", game);
+        broadcastGamesList();
+      } catch (e) {
+        console.error(`[\u2717 Server] Error joining game:`, e.message);
+      }
+    });
+    socket.on("rejoin_game", (data) => {
+      try {
+        const sessionId = typeof data === "string" ? data : data?.sessionId;
+        const userData = typeof data === "object" ? data?.userData : null;
+        const game = games.get(sessionId);
+        if (!game) return;
+        socket.join(sessionId);
+        if (userData) {
+          socketMetadata.set(socket.id, {
+            userId: userData.userId,
+            userName: userData.userName,
+            sessionId
+          });
+        }
+        socket.emit("game_sync", game);
+        broadcastGamesList();
+      } catch (e) {
+        console.error(`[\u2717 Server] Error rejoining game:`, e.message);
+      }
+    });
+    socket.on("update_game", ({ sessionId, updates }) => {
+      try {
+        const game = games.get(sessionId);
+        if (!game) return;
+        if (updates.state) {
+          const mergedState = { ...game.state };
+          if (updates.state.player1) mergedState.player1 = { ...mergedState.player1, ...updates.state.player1 };
+          if (updates.state.player2) mergedState.player2 = { ...mergedState.player2, ...updates.state.player2 };
+          game.state = mergedState;
+        }
+        if (updates.currentTurnId !== void 0) game.currentTurnId = updates.currentTurnId;
+        if (updates.lastAction) game.lastAction = updates.lastAction;
+        if (updates.status) game.status = updates.status;
+        if (updates.winnerId) game.winnerId = updates.winnerId;
+        const bothPlayersDone = game.state?.player1?.mulliganDone && game.state?.player2?.mulliganDone;
+        if (bothPlayersDone && (!game.lastAction || game.lastAction.type !== "game_start")) {
+          game.currentTurnId = game.state.player1.uid;
+          game.lastAction = { type: "game_start", timestamp: Date.now() };
+        }
+        games.set(sessionId, game);
+        io.to(sessionId).emit("game_sync", game);
+        broadcastGamesList();
+      } catch (e) {
+        console.error(`[\u2717 Server] Error updating game ${sessionId}:`, e.message);
+      }
+    });
+    socket.on("delete_game", (sessionId) => {
+      try {
+        if (games.has(sessionId)) {
+          games.delete(sessionId);
+          broadcastGamesList();
+          io.in(sessionId).socketsLeave(sessionId);
+        }
+      } catch (e) {
+        console.error(`[\u2717 Server] Error deleting game:`, e.message);
+      }
+    });
+    socket.on("join_matchmaking", (userData) => {
+      try {
+        if (!userData || !userData.userId) return;
+        const existingIndex = matchmakingQueue.findIndex((p) => p.userId === userData.userId);
+        if (existingIndex >= 0) {
+          matchmakingQueue[existingIndex] = { ...userData, socketId: socket.id };
+        } else {
+          matchmakingQueue.push({ ...userData, socketId: socket.id });
+        }
+        io.emit("matchmaking_count", matchmakingQueue.length);
+        if (matchmakingQueue.length >= 2) {
+          const player1 = matchmakingQueue.shift();
+          const player2 = matchmakingQueue.shift();
+          const gameId = Math.random().toString(36).substr(2, 9);
+          const newGame = {
+            id: gameId,
+            status: "waiting",
+            hostId: player1.userId,
+            hostName: player1.userName,
+            hostAvatar: player1.userAvatar || "",
+            guestId: player2.userId,
+            guestName: player2.userName,
+            guestAvatar: player2.userAvatar || "",
+            currentTurnId: player1.userId,
+            createdAt: Date.now(),
+            state: {
+              player1: { uid: player1.userId, health: 30, mana: { current: 1, max: 1 }, hand: [], board: [], deck: [], fatigue: 0, mulliganDone: false },
+              player2: { uid: player2.userId, health: 30, mana: { current: 0, max: 0 }, hand: [], board: [], deck: [], fatigue: 0, mulliganDone: false }
+            }
+          };
+          games.set(gameId, newGame);
+          io.to(player1.socketId).emit("match_found", newGame);
+          io.to(player2.socketId).emit("match_found", newGame);
+          io.emit("matchmaking_count", matchmakingQueue.length);
+          broadcastGamesList();
+        }
+      } catch (e) {
+        console.error(`[\u2717 Server] Error in join_matchmaking:`, e.message);
+      }
+    });
+    socket.on("leave_matchmaking", () => {
+      try {
+        const index = matchmakingQueue.findIndex((p) => p.socketId === socket.id);
+        if (index >= 0) {
+          matchmakingQueue.splice(index, 1);
+          io.emit("matchmaking_count", matchmakingQueue.length);
+        }
+      } catch (e) {
+        console.error(`[\u2717 Server] Error in leave_matchmaking:`, e.message);
+      }
+    });
+    socket.on("get_matchmaking_count", () => {
+      socket.emit("matchmaking_count", matchmakingQueue.length);
+    });
+    socket.on("disconnect", (reason) => {
+      try {
+        const meta = socketMetadata.get(socket.id);
+        const index = matchmakingQueue.findIndex((p) => p.socketId === socket.id);
+        if (index >= 0) {
+          matchmakingQueue.splice(index, 1);
+          io.emit("matchmaking_count", matchmakingQueue.length);
+        }
+        if (meta) {
+          socketMetadata.delete(socket.id);
+          broadcastGamesList();
+        }
+      } catch (e) {
+        console.error(`[\u2717 Server] Error on disconnect:`, e.message);
+      }
+    });
+    socket.on("error", (err) => {
+      console.error(`[\u2717 Server] Socket error for ${socket.id}:`, err);
+    });
+  });
   app.use((0, import_cors.default)());
   app.use(import_express.default.json({ limit: "50mb" }));
   app.use((req, res, next) => {
@@ -1870,7 +2125,7 @@ async function startServer() {
       res.sendFile(import_path.default.join(distPath, "index.html"));
     });
   }
-  app.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
