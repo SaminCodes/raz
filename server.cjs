@@ -616,6 +616,51 @@ async function startServer() {
       ]);
     }
   });
+  let soundListCache = null;
+  app.get("/api/github/sounds", async (req, res) => {
+    try {
+      const now = Date.now();
+      const isForceRefresh = req.query.refresh === "true";
+      if (soundListCache && !isForceRefresh && now - soundListCache.timestamp < CACHE_TTL) {
+        return res.json(soundListCache.data);
+      }
+      console.log("Fetching sound files from GitHub repository SaminCodes/raz_storage/sounds...");
+      const apiResponse = await fetch("https://api.github.com/repos/SaminCodes/raz_storage/contents/sounds", {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrono-Haven-App/1.0"
+        }
+      });
+      if (!apiResponse.ok) {
+        const errText = await apiResponse.text();
+        console.error("GitHub sounds API response error:", apiResponse.status, errText);
+        if (soundListCache) {
+          return res.json(soundListCache.data);
+        }
+        return res.json([]);
+      }
+      const contents = await apiResponse.json();
+      if (!Array.isArray(contents)) {
+        return res.json([]);
+      }
+      const audioExtensions = [".mp3", ".ogg", ".wav", ".m4a", ".aac", ".flac", ".opus", ".webm"];
+      const soundFiles = contents.filter((file) => file.type === "file" && audioExtensions.some((ext) => file.name.toLowerCase().endsWith(ext))).map((file) => ({
+        name: file.name,
+        path: file.path,
+        size: file.size,
+        download_url: file.download_url || `https://raw.githubusercontent.com/SaminCodes/raz_storage/main/${file.path}`,
+        cdn_url: `https://cdn.jsdelivr.net/gh/SaminCodes/raz_storage@main/${file.path}`,
+        raw_url: `https://raw.githubusercontent.com/SaminCodes/raz_storage/main/${file.path}`
+      }));
+      soundListCache = { data: soundFiles, timestamp: now };
+      res.json(soundFiles);
+    } catch (err) {
+      console.error("Failed to fetch GitHub sound files:", err);
+      if (soundListCache) {
+        return res.json(soundListCache.data);
+      }
+      res.json([]);
+    }
+  });
   let fileContentCache = {};
   app.get("/api/github/file-content", async (req, res) => {
     const filePath = req.query.path;
