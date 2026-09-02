@@ -29,6 +29,7 @@ var import_http = require("http");
 var import_socket = require("socket.io");
 var import_vite = require("vite");
 var import_cors = __toESM(require("cors"), 1);
+var import_sharp = __toESM(require("sharp"), 1);
 var import_genai = require("@google/genai");
 async function startServer() {
   const app = (0, import_express.default)();
@@ -288,6 +289,8 @@ async function startServer() {
   });
   app.use((0, import_cors.default)());
   app.use(import_express.default.json({ limit: "50mb" }));
+  app.use(import_express.default.text({ type: ["text/*", "application/text", "text/plain"], limit: "10mb" }));
+  app.use(import_express.default.urlencoded({ extended: true, limit: "50mb" }));
   app.use((req, res, next) => {
     if (req.url.startsWith("/raz/api/")) {
       req.url = req.url.substring(4);
@@ -526,6 +529,1218 @@ async function startServer() {
     } catch (err) {
       console.error("Nanobanana proxy error:", err);
       res.status(500).json({ error: err.message || "\u0412\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u044F\u044F \u043E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u043F\u0440\u0438 \u043F\u0440\u043E\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0438 \u0437\u0430\u043F\u0440\u043E\u0441\u0430" });
+    }
+  });
+  app.get("/api/proxy-image", async (req, res) => {
+    try {
+      const rawUrl = req.query.url;
+      if (!rawUrl || !rawUrl.startsWith("http://") && !rawUrl.startsWith("https://")) {
+        return res.status(400).send("Invalid URL");
+      }
+      const response = await fetch(rawUrl);
+      if (!response.ok) {
+        return res.status(response.status).send("Failed to fetch upstream image");
+      }
+      const contentType = response.headers.get("content-type") || "image/png";
+      const arrayBuffer = await response.arrayBuffer();
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.send(Buffer.from(arrayBuffer));
+    } catch (e) {
+      res.status(500).send(e.message || "Proxy error");
+    }
+  });
+  app.get("/api/character-avatar/:characterId", async (req, res) => {
+    try {
+      const { characterId } = req.params;
+      const allChars = await getCachedCharacters();
+      const char = allChars.find((c) => c.id === characterId) || findCharacterByName(allChars, characterId);
+      if (!char) {
+        return res.status(404).send("Character not found");
+      }
+      const hasMini = Boolean(char.miniImageUrl && char.miniImageUrl.trim() !== "");
+      const rawUrl = (hasMini ? char.miniImageUrl : char.imageUrl) || char.cardImageUrl || char.avatarUrl;
+      if (!rawUrl) {
+        return res.status(404).send("Character has no image");
+      }
+      const scale = (hasMini ? char.miniImageScale : char.miniImageScale ?? char.imageScale) ?? 1;
+      const xPercent = (hasMini ? char.miniImageX : char.miniImageX ?? char.imageX) ?? 50;
+      const yPercent = (hasMini ? char.miniImageY : char.miniImageY ?? char.imageY) ?? 50;
+      const buffer = await generateCroppedAvatarBuffer(rawUrl, scale, xPercent, yPercent, 512);
+      if (!buffer) {
+        if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+          return res.redirect(rawUrl);
+        }
+        return res.status(500).send("Failed to generate avatar");
+      }
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.send(buffer);
+    } catch (err) {
+      res.status(500).send(err.message || "Avatar generation error");
+    }
+  });
+  async function uploadAvatarBufferToPublicHost(buffer) {
+    if (!buffer || buffer.length === 0) return null;
+    try {
+      const fd = new FormData();
+      fd.append("files[]", new Blob([buffer], { type: "image/png" }), "discord_avatar.png");
+      const res = await fetch("https://uguu.se/upload", {
+        method: "POST",
+        body: fd,
+        signal: AbortSignal.timeout(6e3)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.success && data?.files?.[0]?.url) {
+          return data.files[0].url;
+        }
+      }
+    } catch (e) {
+      console.warn("Uguu avatar upload failed:", e.message);
+    }
+    try {
+      const fd = new FormData();
+      fd.append("reqtype", "fileupload");
+      fd.append("time", "72h");
+      fd.append("fileToUpload", new Blob([buffer], { type: "image/png" }), "discord_avatar.png");
+      const res = await fetch("https://litterbox.catbox.moe/resources/internals/api.php", {
+        method: "POST",
+        body: fd,
+        signal: AbortSignal.timeout(6e3)
+      });
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.startsWith("http")) return text.trim();
+      }
+    } catch (e) {
+      console.warn("Litterbox avatar upload failed:", e.message);
+    }
+    try {
+      const fd = new FormData();
+      fd.append("reqtype", "fileupload");
+      fd.append("fileToUpload", new Blob([buffer], { type: "image/png" }), "avatar.png");
+      const res = await fetch("https://catbox.moe/user/api.php", {
+        method: "POST",
+        body: fd,
+        signal: AbortSignal.timeout(6e3)
+      });
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.startsWith("http")) return text.trim();
+      }
+    } catch (e) {
+      console.warn("Catbox avatar upload failed:", e.message);
+    }
+    try {
+      const fd = new FormData();
+      fd.append("files[]", new Blob([buffer], { type: "image/png" }), "discord_avatar.png");
+      const res = await fetch("https://qu.ax/upload", {
+        method: "POST",
+        body: fd,
+        signal: AbortSignal.timeout(6e3)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.success && data?.files?.[0]?.url) {
+          return data.files[0].url;
+        }
+      }
+    } catch (e) {
+      console.warn("qu.ax avatar upload failed:", e.message);
+    }
+    try {
+      const fd = new FormData();
+      fd.append("file", new Blob([buffer], { type: "image/png" }), "discord_avatar.png");
+      const res = await fetch("https://tmpfiles.org/api/v1/upload", {
+        method: "POST",
+        body: fd,
+        signal: AbortSignal.timeout(6e3)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.status === "success" && data?.data?.url) {
+          return data.data.url.replace("tmpfiles.org/", "tmpfiles.org/dl/");
+        }
+      }
+    } catch (e) {
+      console.warn("tmpfiles avatar upload failed:", e.message);
+    }
+    return null;
+  }
+  async function generateCroppedAvatarBuffer(imageUrl, scale = 1, xPercent = 50, yPercent = 50, targetWidth = 512, targetHeight = 512) {
+    if (!imageUrl) return null;
+    try {
+      let imageBuffer;
+      if (imageUrl.startsWith("data:image/")) {
+        const match = imageUrl.match(/^data:image\/[a-zA-Z0-9+.-]+;base64,(.+)$/);
+        if (!match) return null;
+        imageBuffer = Buffer.from(match[1], "base64");
+      } else {
+        const resp = await fetch(imageUrl, { signal: AbortSignal.timeout(8e3) });
+        if (!resp.ok) return null;
+        imageBuffer = Buffer.from(await resp.arrayBuffer());
+      }
+      const meta = await (0, import_sharp.default)(imageBuffer).metadata();
+      const imgW = meta.width || targetWidth;
+      const imgH = meta.height || targetHeight;
+      const sCover = Math.max(targetWidth / imgW, targetHeight / imgH);
+      const cw = imgW * sCover;
+      const ch = imgH * sCover;
+      const baseLeft = (targetWidth - cw) * (xPercent / 100);
+      const baseTop = (targetHeight - ch) * (yPercent / 100);
+      const ox = targetWidth * (xPercent / 100);
+      const oy = targetHeight * (yPercent / 100);
+      const effectiveScale = Math.max(scale, 0.05);
+      const finalLeft = ox + (baseLeft - ox) * effectiveScale;
+      const finalTop = oy + (baseTop - oy) * effectiveScale;
+      const finalWidth = Math.max(1, Math.round(cw * effectiveScale));
+      const finalHeight = Math.max(1, Math.round(ch * effectiveScale));
+      const resizedBuffer = await (0, import_sharp.default)(imageBuffer).resize(finalWidth, finalHeight, { fit: "fill" }).png().toBuffer();
+      const srcX1 = Math.max(0, -finalLeft);
+      const srcY1 = Math.max(0, -finalTop);
+      const srcX2 = Math.min(finalWidth, targetWidth - finalLeft);
+      const srcY2 = Math.min(finalHeight, targetHeight - finalTop);
+      const extractW = Math.max(1, Math.round(srcX2 - srcX1));
+      const extractH = Math.max(1, Math.round(srcY2 - srcY1));
+      const extractLeft = Math.max(0, Math.min(Math.round(srcX1), finalWidth - extractW));
+      const extractTop = Math.max(0, Math.min(Math.round(srcY1), finalHeight - extractH));
+      const dstLeft = Math.max(0, Math.round(finalLeft));
+      const dstTop = Math.max(0, Math.round(finalTop));
+      const slice = await (0, import_sharp.default)(resizedBuffer).extract({
+        left: extractLeft,
+        top: extractTop,
+        width: Math.min(extractW, finalWidth - extractLeft),
+        height: Math.min(extractH, finalHeight - extractTop)
+      }).toBuffer();
+      const croppedBuffer = await (0, import_sharp.default)({
+        create: {
+          width: targetWidth,
+          height: targetHeight,
+          channels: 4,
+          background: { r: 24, g: 24, b: 27, alpha: 1 }
+        }
+      }).composite([{
+        input: slice,
+        left: dstLeft,
+        top: dstTop
+      }]).png({ quality: 95 }).toBuffer();
+      return croppedBuffer;
+    } catch (e) {
+      console.warn("Avatar sharp cropping failed:", e.message);
+      return null;
+    }
+  }
+  let cachedCharacters = [];
+  let lastCharactersFetchTime = 0;
+  const CHARACTERS_CACHE_TTL = 3e4;
+  const avatarUrlCache = /* @__PURE__ */ new Map();
+  async function getCachedCharacters() {
+    const now = Date.now();
+    if (cachedCharacters.length > 0 && now - lastCharactersFetchTime < CHARACTERS_CACHE_TTL) {
+      return cachedCharacters;
+    }
+    try {
+      const res = await fetch("https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/characters.json");
+      if (res.ok) {
+        const data = await res.json();
+        if (data && typeof data === "object") {
+          cachedCharacters = Object.values(data).map((c) => ({
+            id: c.id,
+            name: c.name || "",
+            imageUrl: c.imageUrl || c.avatarUrl || "",
+            miniImageUrl: c.miniImageUrl || "",
+            cardImageUrl: c.cardImageUrl || "",
+            avatarUrl: c.avatarUrl || c.imageUrl || "",
+            cardColor: c.cardColor || "",
+            tags: Array.isArray(c.tags) ? c.tags : [],
+            isDraft: Boolean(c.isDraft),
+            aliases: Array.isArray(c.aliases) ? c.aliases : [],
+            imageScale: typeof c.imageScale === "number" ? c.imageScale : 1,
+            imageX: typeof c.imageX === "number" ? c.imageX : 50,
+            imageY: typeof c.imageY === "number" ? c.imageY : 50,
+            miniImageScale: typeof c.miniImageScale === "number" ? c.miniImageScale : typeof c.imageScale === "number" ? c.imageScale : 1,
+            miniImageX: typeof c.miniImageX === "number" ? c.miniImageX : typeof c.imageX === "number" ? c.imageX : 50,
+            miniImageY: typeof c.miniImageY === "number" ? c.miniImageY : typeof c.imageY === "number" ? c.imageY : 50,
+            cardImageScale: typeof c.cardImageScale === "number" ? c.cardImageScale : 1,
+            cardImageX: typeof c.cardImageX === "number" ? c.cardImageX : 50,
+            cardImageY: typeof c.cardImageY === "number" ? c.cardImageY : 50
+          }));
+          lastCharactersFetchTime = now;
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to fetch characters from RTDB for webhook relay:", e.message);
+    }
+    return cachedCharacters;
+  }
+  async function getEffectiveAvatarUrlForCharacter(char) {
+    if (!char) return void 0;
+    const hasMini = Boolean(char.miniImageUrl && char.miniImageUrl.trim() !== "");
+    const preferredUrl = (hasMini ? char.miniImageUrl : char.imageUrl) || char.cardImageUrl || char.avatarUrl;
+    if (!preferredUrl) return void 0;
+    const scale = (hasMini ? char.miniImageScale : char.miniImageScale ?? char.imageScale) ?? 1;
+    const xPercent = (hasMini ? char.miniImageX : char.miniImageX ?? char.imageX) ?? 50;
+    const yPercent = (hasMini ? char.miniImageY : char.miniImageY ?? char.imageY) ?? 50;
+    if (scale === 1 && xPercent === 50 && yPercent === 50 && (preferredUrl.startsWith("http://") || preferredUrl.startsWith("https://"))) {
+      return preferredUrl;
+    }
+    const cacheKey = `${char.id}_${preferredUrl}_${scale}_${xPercent}_${yPercent}`;
+    if (avatarUrlCache.has(cacheKey)) {
+      return avatarUrlCache.get(cacheKey);
+    }
+    try {
+      const croppedBuf = await generateCroppedAvatarBuffer(preferredUrl, scale, xPercent, yPercent, 512);
+      if (croppedBuf) {
+        const uploaded = await uploadAvatarBufferToPublicHost(croppedBuf);
+        if (uploaded) {
+          avatarUrlCache.set(cacheKey, uploaded);
+          return uploaded;
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to generate cropped avatar URL for character:", char.name, err.message);
+    }
+    return preferredUrl.startsWith("http://") || preferredUrl.startsWith("https://") ? preferredUrl : void 0;
+  }
+  async function generateMultiAvatarBuffer(characters, targetSize = 512) {
+    if (!characters || characters.length === 0) return null;
+    if (characters.length === 1) {
+      const c = characters[0];
+      const hasMini = Boolean(c.miniImageUrl && c.miniImageUrl.trim() !== "");
+      const rawUrl = (hasMini ? c.miniImageUrl : c.imageUrl) || c.cardImageUrl || c.avatarUrl;
+      const scale = (hasMini ? c.miniImageScale : c.miniImageScale ?? c.imageScale) ?? 1;
+      const x = (hasMini ? c.miniImageX : c.miniImageX ?? c.imageX) ?? 50;
+      const y = (hasMini ? c.miniImageY : c.miniImageY ?? c.imageY) ?? 50;
+      return generateCroppedAvatarBuffer(rawUrl, scale, x, y, targetSize, targetSize);
+    }
+    const count = characters.length;
+    const composites = [];
+    const getCharCrop = async (c, w, h) => {
+      const hasMini = Boolean(c.miniImageUrl && c.miniImageUrl.trim() !== "");
+      const rawUrl = (hasMini ? c.miniImageUrl : c.imageUrl) || c.cardImageUrl || c.avatarUrl;
+      const scale = (hasMini ? c.miniImageScale : c.miniImageScale ?? c.imageScale) ?? 1;
+      const x = (hasMini ? c.miniImageX : c.miniImageX ?? c.imageX) ?? 50;
+      const y = (hasMini ? c.miniImageY : c.miniImageY ?? c.imageY) ?? 50;
+      return generateCroppedAvatarBuffer(rawUrl, scale, x, y, w, h);
+    };
+    try {
+      if (count === 2) {
+        const halfW = Math.floor(targetSize / 2);
+        const [leftHalf, rightHalf] = await Promise.all([
+          getCharCrop(characters[0], halfW, targetSize),
+          getCharCrop(characters[1], halfW, targetSize)
+        ]);
+        if (leftHalf) composites.push({ input: leftHalf, left: 0, top: 0 });
+        if (rightHalf) composites.push({ input: rightHalf, left: halfW, top: 0 });
+        const dividerSvg = Buffer.from(
+          `<svg width="6" height="${targetSize}">
+            <defs>
+              <linearGradient id="divGrad2" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#10b981" stop-opacity="0.9"/>
+                <stop offset="50%" stop-color="#38bdf8" stop-opacity="1"/>
+                <stop offset="100%" stop-color="#10b981" stop-opacity="0.9"/>
+              </linearGradient>
+            </defs>
+            <rect x="0" y="0" width="6" height="${targetSize}" fill="#09090b" opacity="0.9"/>
+            <line x1="3" y1="0" x2="3" y2="${targetSize}" stroke="url(#divGrad2)" stroke-width="2"/>
+          </svg>`
+        );
+        composites.push({ input: dividerSvg, left: halfW - 3, top: 0 });
+      } else if (count === 3) {
+        const colW1 = Math.floor(targetSize / 3);
+        const colW2 = Math.floor(targetSize / 3);
+        const colW3 = targetSize - colW1 - colW2;
+        const [part1, part2, part3] = await Promise.all([
+          getCharCrop(characters[0], colW1, targetSize),
+          getCharCrop(characters[1], colW2, targetSize),
+          getCharCrop(characters[2], colW3, targetSize)
+        ]);
+        if (part1) composites.push({ input: part1, left: 0, top: 0 });
+        if (part2) composites.push({ input: part2, left: colW1, top: 0 });
+        if (part3) composites.push({ input: part3, left: colW1 + colW2, top: 0 });
+        const divSvg = Buffer.from(
+          `<svg width="6" height="${targetSize}">
+            <defs>
+              <linearGradient id="divGrad3" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#10b981" stop-opacity="0.9"/>
+                <stop offset="50%" stop-color="#38bdf8" stop-opacity="1"/>
+                <stop offset="100%" stop-color="#a855f7" stop-opacity="0.9"/>
+              </linearGradient>
+            </defs>
+            <rect x="0" y="0" width="6" height="${targetSize}" fill="#09090b" opacity="0.9"/>
+            <line x1="3" y1="0" x2="3" y2="${targetSize}" stroke="url(#divGrad3)" stroke-width="2"/>
+          </svg>`
+        );
+        composites.push({ input: divSvg, left: colW1 - 3, top: 0 });
+        composites.push({ input: divSvg, left: colW1 + colW2 - 3, top: 0 });
+      } else {
+        const half = Math.floor(targetSize / 2);
+        const [p1, p2, p3, p4] = await Promise.all([
+          getCharCrop(characters[0], half, half),
+          getCharCrop(characters[1], half, half),
+          getCharCrop(characters[2], half, half),
+          getCharCrop(characters[3] || characters[0], half, half)
+        ]);
+        if (p1) composites.push({ input: p1, left: 0, top: 0 });
+        if (p2) composites.push({ input: p2, left: half, top: 0 });
+        if (p3) composites.push({ input: p3, left: 0, top: half });
+        if (p4) composites.push({ input: p4, left: half, top: half });
+        const crossSvg = Buffer.from(
+          `<svg width="${targetSize}" height="${targetSize}">
+            <defs>
+              <linearGradient id="divGrad4" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#10b981" stop-opacity="0.9"/>
+                <stop offset="50%" stop-color="#38bdf8" stop-opacity="1"/>
+                <stop offset="100%" stop-color="#f59e0b" stop-opacity="0.9"/>
+              </linearGradient>
+            </defs>
+            <rect x="${half - 3}" y="0" width="6" height="${targetSize}" fill="#09090b" opacity="0.9"/>
+            <line x1="${half}" y1="0" x2="${half}" y2="${targetSize}" stroke="url(#divGrad4)" stroke-width="2"/>
+            <rect x="0" y="${half - 3}" width="${targetSize}" height="6" fill="#09090b" opacity="0.9"/>
+            <line x1="0" y1="${half}" x2="${targetSize}" y2="${half}" stroke="url(#divGrad4)" stroke-width="2"/>
+          </svg>`
+        );
+        composites.push({ input: crossSvg, left: 0, top: 0 });
+      }
+      return await (0, import_sharp.default)({
+        create: {
+          width: targetSize,
+          height: targetSize,
+          channels: 4,
+          background: { r: 15, g: 15, b: 18, alpha: 1 }
+        }
+      }).composite(composites).png({ quality: 95 }).toBuffer();
+    } catch (err) {
+      console.warn("Multi avatar composition error:", err.message);
+      return null;
+    }
+  }
+  async function getMultiAvatarUrlForCharacters(characters) {
+    if (!characters || characters.length === 0) return void 0;
+    if (characters.length === 1) return getEffectiveAvatarUrlForCharacter(characters[0]);
+    const sortedIds = characters.map((c) => c.id || c.name).sort().join("_");
+    const cacheKey = `multi_${characters.length}_${sortedIds}`;
+    if (avatarUrlCache.has(cacheKey)) {
+      return avatarUrlCache.get(cacheKey);
+    }
+    try {
+      const multiBuf = await generateMultiAvatarBuffer(characters, 512);
+      if (multiBuf) {
+        const uploadedUrl = await uploadAvatarBufferToPublicHost(multiBuf);
+        if (uploadedUrl) {
+          avatarUrlCache.set(cacheKey, uploadedUrl);
+          return uploadedUrl;
+        }
+      }
+    } catch (e) {
+      console.warn("Multi avatar upload error:", e.message);
+    }
+    return await getEffectiveAvatarUrlForCharacter(characters[0]);
+  }
+  function findCharacterExact(characters, searchName) {
+    if (!searchName) return null;
+    const cleanSearch = searchName.replace(/^[\s\u2010-\u2015\u2212\-\—\–\[\*#_~="']+|[\s\u2010-\u2015\u2212\-\—\–\]\*#_~="']+$/g, "").trim().toLowerCase();
+    if (!cleanSearch) return null;
+    const exact = characters.find((c) => !c.isDraft && c.name?.trim().toLowerCase() === cleanSearch);
+    if (exact) return exact;
+    const draftExact = characters.find((c) => c.name?.trim().toLowerCase() === cleanSearch);
+    if (draftExact) return draftExact;
+    const aliasMatch = characters.find((c) => {
+      if (c.isDraft || !c.aliases) return false;
+      return c.aliases.some((a) => a.toLowerCase().trim() === cleanSearch);
+    });
+    if (aliasMatch) return aliasMatch;
+    return null;
+  }
+  function splitCharacterNames(rawHeader) {
+    if (!rawHeader) return [];
+    const cleaned = rawHeader.replace(/^[\s\u2010-\u2015\u2212\-\—\–\[\*#_~="']+|[\s\u2010-\u2015\u2212\-\—\–\]\*#_~="']+$/g, "").trim();
+    if (!cleaned) return [];
+    const parts = cleaned.split(/(?:\s+(?:и|И|and|AND|&|\/|\+)\s+)|(?:,\s*(?:и|И|and|AND|&|\/|\+)?\s*)|(?:\s*[\/&+,]\s*)/).map((s) => s.trim().replace(/^[\s\u2010-\u2015\u2212\-\—\–\[\*#_~="']+|[\s\u2010-\u2015\u2212\-\—\–\]\*#_~="']+$/g, "").trim()).filter(Boolean);
+    return parts;
+  }
+  function resolveCharactersFromHeader(characters, rawCharName, discordUserId) {
+    if (!rawCharName && discordUserId) {
+      const authorChar = characters.find((c) => String(c.discordUserId || "").trim() === String(discordUserId).trim());
+      if (authorChar) {
+        return {
+          isMulti: false,
+          characters: [authorChar],
+          char1: authorChar,
+          char2: null,
+          displayName: authorChar.name
+        };
+      }
+      return null;
+    }
+    if (!rawCharName) return null;
+    const singleMatch = findCharacterExact(characters, rawCharName);
+    if (singleMatch) {
+      return {
+        isMulti: false,
+        characters: [singleMatch],
+        char1: singleMatch,
+        char2: null,
+        displayName: singleMatch.name
+      };
+    }
+    const parts = splitCharacterNames(rawCharName);
+    if (parts.length >= 2) {
+      const matchedList = [];
+      for (const part of parts) {
+        const match = findCharacterExact(characters, part) || findCharacterByName(characters, part);
+        if (match) {
+          matchedList.push(match);
+        }
+      }
+      if (matchedList.length >= 2 && matchedList.length === parts.length) {
+        let displayName = "";
+        if (matchedList.length === 2) {
+          displayName = `${matchedList[0].name} \u0438 ${matchedList[1].name}`;
+        } else {
+          const allExceptLast = matchedList.slice(0, -1).map((c) => c.name).join(", ");
+          displayName = `${allExceptLast} & ${matchedList[matchedList.length - 1].name}`;
+        }
+        if (displayName.length > 80) {
+          displayName = displayName.slice(0, 77) + "...";
+        }
+        return {
+          isMulti: true,
+          characters: matchedList,
+          char1: matchedList[0],
+          char2: matchedList[1] || null,
+          displayName
+        };
+      }
+    }
+    const fuzzySingle = findCharacterByName(characters, rawCharName);
+    if (fuzzySingle) {
+      return {
+        isMulti: false,
+        characters: [fuzzySingle],
+        char1: fuzzySingle,
+        char2: null,
+        displayName: fuzzySingle.name
+      };
+    }
+    return null;
+  }
+  function findCharacterByName(characters, searchName) {
+    if (!searchName) return null;
+    const cleanSearch = searchName.replace(/^[—\-\s\[\*#_]+|[—\-\s\]\*#_]+$/g, "").trim().toLowerCase();
+    if (!cleanSearch) return null;
+    const exact = characters.find((c) => !c.isDraft && c.name?.trim().toLowerCase() === cleanSearch);
+    if (exact) return exact;
+    const draftExact = characters.find((c) => c.name?.trim().toLowerCase() === cleanSearch);
+    if (draftExact) return draftExact;
+    const aliasMatch = characters.find((c) => {
+      if (c.isDraft || !c.aliases) return false;
+      return c.aliases.some((a) => a.toLowerCase().trim() === cleanSearch);
+    });
+    if (aliasMatch) return aliasMatch;
+    return null;
+  }
+  function parseFormattedPostText(rawInput) {
+    let text = (rawInput || "").trim();
+    const webhookUrlRegex = /https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/[0-9]+\/[A-Za-z0-9_\-]+(?:\?[^\s\n\r"']*)?/i;
+    const webhookMatch = text.match(webhookUrlRegex);
+    let webhookUrl = webhookMatch ? webhookMatch[0] : null;
+    if (webhookUrl) {
+      text = text.replace(webhookUrlRegex, "").trim();
+    }
+    let characterName = "";
+    let content = text;
+    const headerRegex = /^[\s\u2010-\u2015\u2212\-\—\–~=]*\[?([^\[\]\n\r\u2010-\u2015\u2212\-\—\–~=]+?)\]?[\s\u2010-\u2015\u2212\-\—\–~=]*(?:\r?\n+)([\s\S]*)$/;
+    const headerMatch = text.match(headerRegex);
+    if (headerMatch) {
+      characterName = headerMatch[1].trim();
+      content = headerMatch[2].trim();
+    } else {
+      const headerWithBrackets = text.match(/^(?:\[|\*\*\[|\*\*|\*|#+\s*\[?)([^\]\*\n\r]+?)(?:\]|\s*\]\*\*|\*\*|\*|\])?(?:\r?\n+)([\s\S]*)$/);
+      if (headerWithBrackets) {
+        characterName = headerWithBrackets[1].trim();
+        content = headerWithBrackets[2].trim();
+      } else {
+        const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        if (lines.length >= 2) {
+          characterName = lines[0].replace(/^[\s\u2010-\u2015\u2212\-\—\–\[\*#_~=]+|[\s\u2010-\u2015\u2212\-\—\–\]\*#_~=]+$/g, "").trim();
+          content = lines.slice(1).join("\n\n").trim();
+        }
+      }
+    }
+    const cleanCharName = (characterName || "").replace(/^[\s\u2010-\u2015\u2212\-\—\–\[\*#_~="']+|[\s\u2010-\u2015\u2212\-\—\–\]\*#_~="']+$/g, "").trim();
+    return {
+      characterName: cleanCharName,
+      content: content.trim(),
+      webhookUrl
+    };
+  }
+  const recentDiscordChannelMessages = /* @__PURE__ */ new Map();
+  app.get("/api/discord/messages", (req, res) => {
+    try {
+      const channelId = req.query.channelId || "all";
+      if (channelId === "all") {
+        const all = [];
+        for (const list2 of recentDiscordChannelMessages.values()) {
+          all.push(...list2);
+        }
+        all.sort((a, b) => b.timestamp - a.timestamp);
+        return res.json({ messages: all.slice(0, 40) });
+      }
+      const list = recentDiscordChannelMessages.get(channelId) || [];
+      return res.json({ messages: list });
+    } catch (e) {
+      res.status(500).json({ error: e.message || "Failed to fetch messages" });
+    }
+  });
+  app.post("/api/discord/webhook", async (req, res) => {
+    try {
+      let rawBody = req.body;
+      if (typeof rawBody === "string") {
+        const parsed = parseFormattedPostText(rawBody);
+        rawBody = {
+          content: parsed.content,
+          username: parsed.characterName,
+          webhookUrl: parsed.webhookUrl || req.query.webhookUrl || req.headers["x-webhook-url"]
+        };
+      }
+      let {
+        webhookUrl = "https://discord.com/api/webhooks/1543256017541009408/87-f0tjU4PrV4zufqPgcJvLDrD9RjUsTqApb50ug2trF-lljECLmQT8bBzhIhAqYUIeV",
+        channelId = "ch-1",
+        username,
+        avatarUrl,
+        avatarBase64,
+        content,
+        embeds,
+        location,
+        replyMessageId,
+        message_reference
+      } = rawBody || {};
+      if (content && typeof content === "string" && !username && (content.includes("\u2014") || content.startsWith("["))) {
+        const parsed = parseFormattedPostText(content);
+        if (parsed.characterName) {
+          username = parsed.characterName;
+          content = parsed.content;
+          if (parsed.webhookUrl && !webhookUrl) {
+            webhookUrl = parsed.webhookUrl;
+          }
+        }
+      }
+      if (username && !avatarUrl && !avatarBase64) {
+        const allChars = await getCachedCharacters();
+        const resolved = resolveCharactersFromHeader(allChars, username);
+        if (resolved) {
+          username = resolved.displayName;
+          avatarUrl = await getMultiAvatarUrlForCharacters(resolved.characters);
+        }
+      }
+      const targetUrl = webhookUrl || "https://discord.com/api/webhooks/1543256017541009408/87-f0tjU4PrV4zufqPgcJvLDrD9RjUsTqApb50ug2trF-lljECLmQT8bBzhIhAqYUIeV";
+      if (!targetUrl || !targetUrl.startsWith("https://discord.com/api/webhooks/")) {
+        return res.status(400).json({ error: "\u041D\u0435\u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u044B\u0439 Discord Webhook URL" });
+      }
+      if (!content && (!embeds || embeds.length === 0)) {
+        return res.status(400).json({ error: "\u0421\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u043F\u0443\u0441\u0442\u044B\u043C" });
+      }
+      let effectiveAvatarUrl = avatarUrl;
+      if (avatarBase64 && typeof avatarBase64 === "string" && avatarBase64.startsWith("data:image/")) {
+        try {
+          const match = avatarBase64.match(/^data:image\/[a-zA-Z0-9+.-]+;base64,(.+)$/);
+          if (match) {
+            const buffer = Buffer.from(match[1], "base64");
+            const uploadedUrl = await uploadAvatarBufferToPublicHost(buffer);
+            if (uploadedUrl) {
+              effectiveAvatarUrl = uploadedUrl;
+            }
+          }
+        } catch (cropErr) {
+          console.error("Error processing avatarBase64 for Discord webhook:", cropErr);
+        }
+      }
+      const payload = {};
+      if (content) payload.content = String(content).slice(0, 2e3);
+      if (username) payload.username = String(username).slice(0, 80);
+      if (effectiveAvatarUrl && (effectiveAvatarUrl.startsWith("http://") || effectiveAvatarUrl.startsWith("https://"))) {
+        payload.avatar_url = effectiveAvatarUrl;
+      }
+      if (Array.isArray(embeds) && embeds.length > 0) {
+        payload.embeds = embeds.map((emb) => {
+          const cleanEmb = {};
+          if (emb.title) cleanEmb.title = String(emb.title).slice(0, 256);
+          if (emb.description) cleanEmb.description = String(emb.description).slice(0, 4096);
+          if (emb.color !== void 0) {
+            cleanEmb.color = typeof emb.color === "number" ? emb.color : parseInt(String(emb.color).replace("#", ""), 16) || 3900150;
+          }
+          if (emb.author?.name) {
+            const iconUrl = emb.author.icon_url || effectiveAvatarUrl;
+            cleanEmb.author = {
+              name: String(emb.author.name).slice(0, 256),
+              icon_url: iconUrl && (iconUrl.startsWith("http://") || iconUrl.startsWith("https://")) ? iconUrl : void 0
+            };
+          }
+          if (emb.image?.url && (emb.image.url.startsWith("http://") || emb.image.url.startsWith("https://"))) {
+            cleanEmb.image = { url: emb.image.url };
+          }
+          if (emb.thumbnail?.url && (emb.thumbnail.url.startsWith("http://") || emb.thumbnail.url.startsWith("https://"))) {
+            cleanEmb.thumbnail = { url: emb.thumbnail.url };
+          } else if (effectiveAvatarUrl && (effectiveAvatarUrl.startsWith("http://") || effectiveAvatarUrl.startsWith("https://"))) {
+            cleanEmb.thumbnail = { url: effectiveAvatarUrl };
+          }
+          if (emb.footer?.text) {
+            cleanEmb.footer = { text: String(emb.footer.text).slice(0, 2048) };
+          }
+          if (emb.timestamp) {
+            cleanEmb.timestamp = emb.timestamp;
+          }
+          if (Array.isArray(emb.fields)) {
+            cleanEmb.fields = emb.fields.slice(0, 25).map((f) => ({
+              name: String(f.name || "").slice(0, 256),
+              value: String(f.value || "").slice(0, 1024),
+              inline: Boolean(f.inline)
+            }));
+          }
+          return cleanEmb;
+        });
+      }
+      const postUrl = targetUrl.includes("?") ? `${targetUrl}&wait=true` : `${targetUrl}?wait=true`;
+      const discordResponse = await fetch(postUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+      if (!discordResponse.ok) {
+        const errText = await discordResponse.text();
+        console.error(`[Discord Webhook Error ${discordResponse.status}]:`, errText);
+        return res.status(discordResponse.status).json({
+          error: `\u041E\u0448\u0438\u0431\u043A\u0430 Discord (${discordResponse.status}): ${errText}`
+        });
+      }
+      let messageId = `msg-${Date.now()}`;
+      try {
+        const jsonResult = await discordResponse.json();
+        if (jsonResult?.id) {
+          messageId = jsonResult.id;
+        }
+      } catch {
+      }
+      const savedItem = {
+        id: messageId,
+        channelId: String(channelId),
+        username: String(username || "\u0411\u0435\u0437\u044B\u043C\u044F\u043D\u043D\u044B\u0439"),
+        avatarUrl: effectiveAvatarUrl,
+        content: String(content || embeds?.[0]?.description || ""),
+        timestamp: Date.now(),
+        mode: Array.isArray(embeds) && embeds.length > 0 ? "embed" : "standard",
+        location: location ? String(location) : void 0
+      };
+      const existingList = recentDiscordChannelMessages.get(channelId) || [];
+      recentDiscordChannelMessages.set(channelId, [savedItem, ...existingList.filter((m) => m.id !== messageId)].slice(0, 50));
+      res.json({ success: true, messageId, message: savedItem });
+    } catch (err) {
+      console.error("Discord Webhook endpoint exception:", err);
+      res.status(500).json({ error: err.message || "\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u0438 \u043E\u0442\u043F\u0440\u0430\u0432\u043A\u0435 \u0432 Discord" });
+    }
+  });
+  const incomingRelayPosts = [];
+  const sseClients = [];
+  (async () => {
+    try {
+      const res = await fetch("https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/discord_incoming_posts.json");
+      if (res.ok) {
+        const data = await res.json();
+        if (data && typeof data === "object") {
+          const list = Object.values(data).filter(Boolean);
+          list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+          incomingRelayPosts.length = 0;
+          incomingRelayPosts.push(...list.slice(0, 200));
+          console.log(`[Relay Hub] \u0417\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u043E ${incomingRelayPosts.length} \u0432\u0445\u043E\u0434\u044F\u0449\u0438\u0445 \u043F\u043E\u0441\u0442\u043E\u0432 \u0438\u0437 \u0431\u0430\u0437\u044B \u0434\u0430\u043D\u043D\u044B\u0445`);
+        }
+      }
+    } catch (e) {
+      console.warn("[Relay Hub] \u041F\u0440\u0435\u0434\u0443\u043F\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u043F\u0440\u0438 \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0435 \u043F\u043E\u0441\u0442\u043E\u0432 \u0438\u0437 RTDB:", e.message);
+    }
+  })();
+  function broadcastIncomingPost(post) {
+    const data = JSON.stringify(post);
+    for (let i = sseClients.length - 1; i >= 0; i--) {
+      const client = sseClients[i];
+      try {
+        client.write(`data: ${data}
+
+`);
+      } catch {
+        sseClients.splice(i, 1);
+      }
+    }
+    try {
+      io.emit("discord_relay_post", post);
+    } catch {
+    }
+  }
+  function recordIncomingPost(entry) {
+    const fullEntry = {
+      id: entry.id || `relay-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: entry.timestamp || Date.now(),
+      rawInput: entry.rawInput || "",
+      parsedName: entry.parsedName || "",
+      characterFound: Boolean(entry.characterFound),
+      character: entry.character || null,
+      postedAs: entry.postedAs || { username: entry.parsedName || "\u0411\u0435\u0437\u044B\u043C\u044F\u043D\u043D\u044B\u0439" },
+      content: entry.content || "",
+      webhookUrl: entry.webhookUrl || "",
+      discordMessageId: entry.discordMessageId,
+      status: entry.status,
+      error: entry.error,
+      clientIp: entry.clientIp,
+      source: entry.source || "bot_webhook"
+    };
+    incomingRelayPosts.unshift(fullEntry);
+    if (incomingRelayPosts.length > 200) {
+      incomingRelayPosts.pop();
+    }
+    broadcastIncomingPost(fullEntry);
+    fetch(`https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/discord_incoming_posts/${fullEntry.id}.json`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fullEntry)
+    }).catch((err) => {
+      console.warn("[Relay Hub] \u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u044F \u043F\u043E\u0441\u0442\u0430 \u0432 RTDB:", err.message);
+    });
+    return fullEntry;
+  }
+  const inFlightQueueIds = /* @__PURE__ */ new Set();
+  async function processSinglePendingPost(item) {
+    if (!item || !item.id || inFlightQueueIds.has(item.id)) return;
+    inFlightQueueIds.add(item.id);
+    try {
+      fetch(`https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/discord_pending_posts/${item.id}.json`, {
+        method: "DELETE"
+      }).catch(() => {
+      });
+      const rawText = item.rawText || item.content || "";
+      const characterName = item.characterName || item.parsedName || "";
+      const content = item.content || rawText;
+      let targetWebhookUrl = item.webhookUrl || "https://discord.com/api/webhooks/1543256017541009408/87-f0tjU4PrV4zufqPgcJvLDrD9RjUsTqApb50ug2trF-lljECLmQT8bBzhIhAqYUIeV";
+      if (!content) {
+        console.warn(`[Queue Worker] \u041F\u0440\u043E\u043F\u0443\u0441\u043A \u043F\u0443\u0441\u0442\u043E\u0433\u043E \u043F\u043E\u0441\u0442\u0430 ${item.id}`);
+        return;
+      }
+      const allChars = await getCachedCharacters();
+      const resolved = resolveCharactersFromHeader(allChars, characterName, item.authorDiscordId);
+      let effectiveDisplayName = characterName || "\u0411\u0435\u0437\u044B\u043C\u044F\u043D\u043D\u044B\u0439";
+      let effectiveAvatarUrl = void 0;
+      let primaryCharData = null;
+      let allCharsData = [];
+      if (resolved) {
+        effectiveDisplayName = resolved.displayName;
+        allCharsData = resolved.characters.map((c) => ({
+          id: c.id,
+          name: c.name,
+          imageUrl: c.imageUrl || c.avatarUrl || "",
+          cardColor: c.cardColor || ""
+        }));
+        primaryCharData = allCharsData[0] || null;
+        effectiveAvatarUrl = await getMultiAvatarUrlForCharacters(resolved.characters);
+      }
+      const payload = {
+        username: String(effectiveDisplayName).slice(0, 80),
+        content: String(content).slice(0, 2e3)
+      };
+      if (effectiveAvatarUrl && (effectiveAvatarUrl.startsWith("http://") || effectiveAvatarUrl.startsWith("https://"))) {
+        payload.avatar_url = effectiveAvatarUrl;
+      }
+      let postUrl = targetWebhookUrl;
+      if (item.threadId) {
+        postUrl = postUrl.includes("?") ? `${postUrl}&thread_id=${item.threadId}&wait=true` : `${postUrl}?thread_id=${item.threadId}&wait=true`;
+      } else {
+        postUrl = postUrl.includes("?") ? `${postUrl}&wait=true` : `${postUrl}?wait=true`;
+      }
+      console.log(`[Queue Worker] \u041E\u0442\u043F\u0440\u0430\u0432\u043A\u0430 \u043F\u043E\u0441\u0442\u0430 \u043E\u0442 \u0438\u043C\u0435\u043D\u0438 [${effectiveDisplayName}] \u0447\u0435\u0440\u0435\u0437 \u0432\u0435\u0431\u0445\u0443\u043A...`);
+      const discordResponse = await fetch(postUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!discordResponse.ok) {
+        const errText = await discordResponse.text();
+        console.error(`[Queue Worker] \u041E\u0448\u0438\u0431\u043A\u0430 Discord (${discordResponse.status}):`, errText);
+        recordIncomingPost({
+          id: item.id,
+          timestamp: item.timestamp || Date.now(),
+          rawInput: rawText,
+          parsedName: effectiveDisplayName,
+          characterFound: Boolean(resolved),
+          character: primaryCharData,
+          postedAs: {
+            username: effectiveDisplayName,
+            avatarUrl: effectiveAvatarUrl
+          },
+          content,
+          webhookUrl: targetWebhookUrl,
+          status: "error",
+          error: `Discord error ${discordResponse.status}: ${errText}`,
+          source: "discord_queue_worker"
+        });
+        return;
+      }
+      let discordMsgId = "";
+      try {
+        const resJson = await discordResponse.json();
+        if (resJson?.id) discordMsgId = resJson.id;
+      } catch {
+      }
+      console.log(`[Queue Worker] \u2713 \u041F\u043E\u0441\u0442 \u043E\u0442 [${effectiveDisplayName}] \u0443\u0441\u043F\u0435\u0448\u043D\u043E \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u043D \u0447\u0435\u0440\u0435\u0437 \u0432\u0435\u0431\u0445\u0443\u043A!`);
+      const fullRecord = recordIncomingPost({
+        id: item.id,
+        timestamp: item.timestamp || Date.now(),
+        rawInput: rawText,
+        parsedName: effectiveDisplayName,
+        characterFound: Boolean(resolved),
+        character: primaryCharData,
+        postedAs: {
+          username: effectiveDisplayName,
+          avatarUrl: effectiveAvatarUrl
+        },
+        content,
+        webhookUrl: targetWebhookUrl,
+        discordMessageId: discordMsgId,
+        status: "success",
+        source: "discord_queue_worker"
+      });
+      if (resolved && resolved.characters && resolved.characters.length > 0) {
+        for (const ch of resolved.characters) {
+          if (!ch || !ch.id) continue;
+          fetch(`https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/characters/${ch.id}/discordPostCount.json`).then((r) => r.json()).then((count) => {
+            const current = typeof count === "number" ? count : 0;
+            return fetch(`https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/characters/${ch.id}/discordPostCount.json`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(current + 1)
+            });
+          }).catch(() => {
+          });
+        }
+      }
+    } catch (queueErr) {
+      console.error(`[Queue Worker] \u0418\u0441\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043F\u0440\u0438 \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u043A\u0435 ${item.id}:`, queueErr);
+    } finally {
+      setTimeout(() => inFlightQueueIds.delete(item.id), 1e4);
+    }
+  }
+  let isCheckingQueue = false;
+  async function pollPendingPostsQueue() {
+    if (isCheckingQueue) return;
+    isCheckingQueue = true;
+    try {
+      const res = await fetch("https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/discord_pending_posts.json");
+      if (res.ok) {
+        const data = await res.json();
+        if (data && typeof data === "object") {
+          const entries = Object.entries(data);
+          for (const [key, value] of entries) {
+            if (value && typeof value === "object") {
+              const item = { ...value, id: key };
+              await processSinglePendingPost(item);
+            }
+          }
+        }
+      }
+    } catch (e) {
+    } finally {
+      isCheckingQueue = false;
+    }
+  }
+  setInterval(pollPendingPostsQueue, 1e3);
+  console.log("\u26A1 [Discord Queue Worker] \u0421\u043B\u0443\u0448\u0430\u0442\u0435\u043B\u044C \u043E\u0447\u0435\u0440\u0435\u0434\u0438 \u043F\u043E\u0441\u0442\u043E\u0432 \u0438\u0437 Discord \u0430\u043A\u0442\u0438\u0432\u0438\u0440\u043E\u0432\u0430\u043D \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435");
+  app.get("/api/discord/incoming-posts/stream", (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    res.write(`data: ${JSON.stringify({ type: "init", count: incomingRelayPosts.length })}
+
+`);
+    sseClients.push(res);
+    req.on("close", () => {
+      const idx = sseClients.indexOf(res);
+      if (idx !== -1) {
+        sseClients.splice(idx, 1);
+      }
+    });
+  });
+  app.get("/api/discord/incoming-posts", async (req, res) => {
+    if (incomingRelayPosts.length === 0) {
+      try {
+        const rtdbRes = await fetch("https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/discord_incoming_posts.json");
+        if (rtdbRes.ok) {
+          const data = await rtdbRes.json();
+          if (data && typeof data === "object") {
+            const list2 = Object.values(data).filter(Boolean);
+            list2.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+            incomingRelayPosts.push(...list2.slice(0, 200));
+          }
+        }
+      } catch {
+      }
+    }
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const list = incomingRelayPosts.slice(0, limit);
+    const total = incomingRelayPosts.length;
+    const successCount = incomingRelayPosts.filter((p) => p.status === "success").length;
+    const errorCount = incomingRelayPosts.filter((p) => p.status === "error").length;
+    const charsFoundCount = incomingRelayPosts.filter((p) => p.characterFound).length;
+    res.json({
+      posts: list,
+      total,
+      stats: {
+        total,
+        success: successCount,
+        error: errorCount,
+        charactersFound: charsFoundCount
+      }
+    });
+  });
+  app.delete("/api/discord/incoming-posts", async (req, res) => {
+    incomingRelayPosts.length = 0;
+    try {
+      await fetch("https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/discord_incoming_posts.json", {
+        method: "DELETE"
+      });
+    } catch {
+    }
+    res.json({ success: true, message: "\u0418\u0441\u0442\u043E\u0440\u0438\u044F \u0432\u0445\u043E\u0434\u044F\u0449\u0438\u0445 \u043F\u043E\u0441\u0442\u043E\u0432 \u043E\u0447\u0438\u0449\u0435\u043D\u0430" });
+  });
+  app.post(["/api/discord/relay-character-post", "/api/discord/post-as-character"], async (req, res) => {
+    let rawText = "";
+    let directCharName = "";
+    let directContent = "";
+    let directWebhookUrl = "";
+    const clientIp = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
+    try {
+      if (typeof req.body === "string") {
+        rawText = req.body;
+      } else if (req.body && typeof req.body === "object") {
+        if (req.body.message && typeof req.body.message === "string") {
+          rawText = req.body.message;
+        } else if (req.body.text && typeof req.body.text === "string") {
+          rawText = req.body.text;
+        } else if (req.body.raw && typeof req.body.raw === "string") {
+          rawText = req.body.raw;
+        } else if (req.body.content && typeof req.body.content === "string") {
+          directContent = req.body.content;
+          directCharName = req.body.characterName || req.body.character || req.body.username || req.body.name || "";
+          directWebhookUrl = req.body.webhookUrl || req.body.webhook || "";
+          if (!directCharName || !directWebhookUrl) {
+            rawText = req.body.content;
+          }
+        }
+      }
+      let parsedName = directCharName;
+      let parsedContent = directContent;
+      let parsedWebhookUrl = directWebhookUrl;
+      if (rawText) {
+        const parsed = parseFormattedPostText(rawText);
+        if (!parsedName) parsedName = parsed.characterName;
+        if (!parsedContent) parsedContent = parsed.content;
+        if (!parsedWebhookUrl) parsedWebhookUrl = parsed.webhookUrl || "";
+      }
+      if (!parsedWebhookUrl) {
+        parsedWebhookUrl = req.query.webhookUrl || req.headers["x-webhook-url"] || (typeof req.body === "object" ? req.body.webhookUrl : "") || "";
+      }
+      if (!parsedWebhookUrl || !parsedWebhookUrl.startsWith("https://discord.com/api/webhooks/") && !parsedWebhookUrl.startsWith("https://discordapp.com/api/webhooks/")) {
+        const errMsg = "\u041D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430 \u0441\u0441\u044B\u043B\u043A\u0430 \u043D\u0430 Discord Webhook (\u0444\u043E\u0440\u043C\u0430\u0442: https://discord.com/api/webhooks/...)";
+        recordIncomingPost({
+          rawInput: rawText || JSON.stringify(req.body),
+          parsedName,
+          characterFound: false,
+          postedAs: { username: parsedName || "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u0439" },
+          content: parsedContent,
+          webhookUrl: parsedWebhookUrl,
+          status: "error",
+          error: errMsg,
+          clientIp
+        });
+        return res.status(400).json({
+          error: errMsg,
+          parsedName,
+          parsedContent: parsedContent ? parsedContent.slice(0, 100) + "..." : ""
+        });
+      }
+      if (!parsedContent) {
+        const errMsg = "\u0422\u0435\u043A\u0441\u0442 \u043F\u043E\u0441\u0442\u0430 \u043F\u0443\u0441\u0442";
+        recordIncomingPost({
+          rawInput: rawText || JSON.stringify(req.body),
+          parsedName,
+          characterFound: false,
+          postedAs: { username: parsedName || "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u0439" },
+          content: "",
+          webhookUrl: parsedWebhookUrl,
+          status: "error",
+          error: errMsg,
+          clientIp
+        });
+        return res.status(400).json({
+          error: errMsg,
+          parsedName
+        });
+      }
+      const allChars = await getCachedCharacters();
+      const resolved = resolveCharactersFromHeader(allChars, parsedName);
+      const matchedChar = resolved?.char1 || null;
+      const effectiveUsername = resolved ? resolved.displayName : parsedName || "\u041F\u0435\u0440\u0441\u043E\u043D\u0430\u0436";
+      let effectiveAvatarUrl;
+      if (resolved) {
+        effectiveAvatarUrl = await getMultiAvatarUrlForCharacters(resolved.characters);
+      }
+      if (effectiveAvatarUrl && effectiveAvatarUrl.startsWith("data:image/")) {
+        try {
+          const match = effectiveAvatarUrl.match(/^data:image\/[a-zA-Z0-9+.-]+;base64,(.+)$/);
+          if (match) {
+            const buffer = Buffer.from(match[1], "base64");
+            const uploadedUrl = await uploadAvatarBufferToPublicHost(buffer);
+            if (uploadedUrl) {
+              effectiveAvatarUrl = uploadedUrl;
+            }
+          }
+        } catch (cropErr) {
+          console.error("Error processing avatar for character post relay:", cropErr);
+        }
+      }
+      const payload = {
+        username: effectiveUsername.slice(0, 80),
+        content: parsedContent.slice(0, 2e3)
+      };
+      if (effectiveAvatarUrl && (effectiveAvatarUrl.startsWith("http://") || effectiveAvatarUrl.startsWith("https://"))) {
+        payload.avatar_url = effectiveAvatarUrl;
+      }
+      const explicitThreadId = req.query.thread_id || req.query.threadId || (typeof req.body === "object" ? req.body.thread_id || req.body.threadId : "");
+      let targetPostUrl = parsedWebhookUrl;
+      if (explicitThreadId && !targetPostUrl.includes("thread_id=")) {
+        targetPostUrl += targetPostUrl.includes("?") ? `&thread_id=${explicitThreadId}` : `?thread_id=${explicitThreadId}`;
+      }
+      const postUrl = targetPostUrl.includes("?") ? `${targetPostUrl}&wait=true` : `${targetPostUrl}?wait=true`;
+      const discordResponse = await fetch(postUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+      if (!discordResponse.ok) {
+        const errText = await discordResponse.text();
+        console.error(`[Discord Relay Error ${discordResponse.status}]:`, errText);
+        const errMsg = `\u041E\u0448\u0438\u0431\u043A\u0430 Discord (${discordResponse.status}): ${errText}`;
+        recordIncomingPost({
+          rawInput: rawText || JSON.stringify(req.body),
+          parsedName,
+          characterFound: Boolean(matchedChar),
+          character: matchedChar ? {
+            id: matchedChar.id,
+            name: matchedChar.name,
+            imageUrl: matchedChar.imageUrl,
+            cardColor: matchedChar.cardColor
+          } : null,
+          postedAs: {
+            username: effectiveUsername,
+            avatarUrl: effectiveAvatarUrl
+          },
+          content: parsedContent,
+          webhookUrl: parsedWebhookUrl,
+          status: "error",
+          error: errMsg,
+          clientIp
+        });
+        return res.status(discordResponse.status).json({
+          error: errMsg
+        });
+      }
+      let discordMsgId = `msg-${Date.now()}`;
+      let detectedChannelId = "relay";
+      try {
+        const jsonResult = await discordResponse.json();
+        if (jsonResult?.id) {
+          discordMsgId = jsonResult.id;
+        }
+        if (jsonResult?.channel_id) {
+          detectedChannelId = String(jsonResult.channel_id);
+        }
+      } catch {
+      }
+      if (detectedChannelId === "relay") {
+        const urlMatch = parsedWebhookUrl.match(/\/webhooks\/([0-9]+)/);
+        if (urlMatch && urlMatch[1]) {
+          detectedChannelId = urlMatch[1];
+        }
+      }
+      recordIncomingPost({
+        rawInput: rawText || JSON.stringify(req.body),
+        parsedName,
+        characterFound: Boolean(matchedChar),
+        character: matchedChar ? {
+          id: matchedChar.id,
+          name: matchedChar.name,
+          imageUrl: matchedChar.imageUrl,
+          cardColor: matchedChar.cardColor
+        } : null,
+        postedAs: {
+          username: effectiveUsername,
+          avatarUrl: effectiveAvatarUrl
+        },
+        content: parsedContent,
+        webhookUrl: parsedWebhookUrl,
+        discordMessageId: discordMsgId,
+        status: "success",
+        clientIp
+      });
+      const savedItem = {
+        id: discordMsgId,
+        channelId: detectedChannelId,
+        username: effectiveUsername,
+        avatarUrl: effectiveAvatarUrl,
+        content: parsedContent,
+        timestamp: Date.now(),
+        mode: "standard"
+      };
+      const keysToSave = [detectedChannelId, "relay", "all"];
+      for (const k of keysToSave) {
+        const existingList = recentDiscordChannelMessages.get(k) || [];
+        recentDiscordChannelMessages.set(k, [savedItem, ...existingList.filter((m) => m.id !== discordMsgId)].slice(0, 50));
+      }
+      return res.json({
+        success: true,
+        characterFound: Boolean(matchedChar),
+        character: matchedChar ? {
+          id: matchedChar.id,
+          name: matchedChar.name,
+          imageUrl: matchedChar.imageUrl,
+          cardColor: matchedChar.cardColor
+        } : null,
+        postedAs: {
+          username: effectiveUsername,
+          avatarUrl: effectiveAvatarUrl
+        },
+        content: parsedContent,
+        discordMessageId: discordMsgId
+      });
+    } catch (err) {
+      console.error("Relay character post error:", err);
+      const errMsg = err.message || "\u0412\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u044F\u044F \u043E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u0438 \u043E\u0442\u043F\u0440\u0430\u0432\u043A\u0435 \u043F\u043E\u0441\u0442\u0430";
+      recordIncomingPost({
+        rawInput: rawText || JSON.stringify(req.body),
+        parsedName: directCharName,
+        characterFound: false,
+        postedAs: { username: directCharName || "\u041F\u0435\u0440\u0441\u043E\u043D\u0430\u0436" },
+        content: directContent,
+        webhookUrl: directWebhookUrl,
+        status: "error",
+        error: errMsg,
+        clientIp
+      });
+      res.status(500).json({ error: errMsg });
     }
   });
   function parseCSV(csvText) {
@@ -2131,6 +3346,142 @@ async function startServer() {
           isFallback: true
         });
       }
+    }
+  });
+  function extractYoutubeId(url) {
+    if (!url) return null;
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+    const match = url.match(regExp);
+    return match && match[2].length === 11 ? match[2] : null;
+  }
+  const ytInfoCache = /* @__PURE__ */ new Map();
+  app.get("/api/youtube/info", async (req, res) => {
+    try {
+      const rawUrl = req.query.url;
+      if (!rawUrl || typeof rawUrl !== "string") {
+        return res.status(400).json({ error: "No URL provided" });
+      }
+      const videoId = extractYoutubeId(rawUrl);
+      if (!videoId) {
+        return res.status(400).json({ error: "Invalid YouTube URL" });
+      }
+      const cacheKey = `yt_info_${videoId}`;
+      if (ytInfoCache.has(cacheKey)) {
+        return res.json(ytInfoCache.get(cacheKey));
+      }
+      let title = "";
+      let authorName = "";
+      let authorUrl = "";
+      let thumbnail = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+      let description = "";
+      const detectedArtists = [];
+      try {
+        const oembedRes = await fetch(
+          `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
+        );
+        if (oembedRes.ok) {
+          const oembedData = await oembedRes.json();
+          title = oembedData.title || "";
+          authorName = oembedData.author_name || "";
+          authorUrl = oembedData.author_url || "";
+          if (oembedData.thumbnail_url) {
+            thumbnail = oembedData.thumbnail_url;
+          }
+        }
+      } catch (e) {
+        console.warn("oEmbed fetch failed for videoId:", videoId);
+      }
+      try {
+        const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+          }
+        });
+        if (pageRes.ok) {
+          const html = await pageRes.text();
+          const descMatch = html.match(/<meta\s+name=["']description["']\s+content=["'](.*?)["']/i) || html.match(/<meta\s+property=["']og:description["']\s+content=["'](.*?)["']/i);
+          if (descMatch && descMatch[1]) {
+            description = descMatch[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+          }
+          if (!authorName) {
+            const channelMatch = html.match(/<link\s+itemprop=["']name["']\s+content=["'](.*?)["']/i) || html.match(/<meta\s+itemprop=["']channelId["']\s+content=["'](.*?)["']/i);
+            if (channelMatch && channelMatch[1]) {
+              authorName = channelMatch[1];
+            }
+          }
+          if (!title) {
+            const titleMatch = html.match(/<meta\s+name=["']title["']\s+content=["'](.*?)["']/i) || html.match(/<title>(.*?) - YouTube<\/title>/i);
+            if (titleMatch && titleMatch[1]) {
+              title = titleMatch[1];
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("Page fetch failed for videoId:", videoId);
+      }
+      const addArtistCandidate = (name) => {
+        if (!name) return;
+        const clean = name.trim();
+        if (clean.length >= 2 && clean.length <= 80 && !detectedArtists.includes(clean)) {
+          detectedArtists.push(clean);
+        }
+      };
+      if (authorName) {
+        const cleanAuthor = authorName.replace(/\s*-\s*Topic$/i, "").replace(/\s*VEVO$/i, "").replace(/\s*Official\s*(Channel|Music|Page|Audio|Video|TV)?$/i, "").replace(/\s*Records$/i, "").replace(/\s*Music$/i, "").trim();
+        addArtistCandidate(cleanAuthor);
+        if (authorName !== cleanAuthor) {
+          addArtistCandidate(authorName);
+        }
+      }
+      if (title) {
+        const cleanTitle = title.replace(/\[.*?\]/g, " ").replace(/\(.*?(official|video|audio|remaster|hd|4k|lyric|clip|ost|soundtrack).*?\)/gi, " ").trim();
+        const separators = [" - ", " \u2013 ", " \u2014 ", " : ", " // ", " \u2022 ", " | "];
+        for (const sep of separators) {
+          if (cleanTitle.includes(sep)) {
+            const parts = cleanTitle.split(sep);
+            addArtistCandidate(parts[0]);
+            break;
+          }
+        }
+      }
+      if (description) {
+        const ytMusicMatch = description.match(
+          /(?:Provided to YouTube by[^\n]*\n+)([^\n·•]+)[·•]([^\n]+)/i
+        );
+        if (ytMusicMatch && ytMusicMatch[2]) {
+          addArtistCandidate(ytMusicMatch[2]);
+        }
+        const patterns = [
+          /(?:Artist|Исполнитель|Author|Автор музыки|Composer|Композитор|Music by|Музыка|Группа|Band):\s*([^\n,\r]+)/gi,
+          /(?:Track|Песня):\s*([^\n\r-]+)\s*-\s*([^\n\r,]+)/gi
+        ];
+        for (const pat of patterns) {
+          let match;
+          while ((match = pat.exec(description)) !== null) {
+            const val = (match[2] || match[1]).trim();
+            addArtistCandidate(val);
+          }
+        }
+      }
+      const result = {
+        videoId,
+        title,
+        authorName,
+        authorUrl,
+        thumbnail,
+        description: description ? description.substring(0, 800) : "",
+        detectedArtists
+      };
+      ytInfoCache.set(cacheKey, result);
+      if (ytInfoCache.size > 500) {
+        const firstKey = ytInfoCache.keys().next().value;
+        if (firstKey) ytInfoCache.delete(firstKey);
+      }
+      res.json(result);
+    } catch (err) {
+      console.error("YouTube info error:", err);
+      res.status(500).json({ error: err.message || "Failed to fetch YouTube info" });
     }
   });
   app.get("/api/proxy-image", async (req, res) => {
