@@ -5,7 +5,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Разлом</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="./vendor/tailwindcss.js"></script>
+    <script>
+      if (typeof tailwind === 'undefined') {
+        document.write('<script src="https://cdn.tailwindcss.com"><\/script>');
+      }
+    </script>
     <script>
       tailwind.config = {
         theme: {
@@ -33,14 +38,14 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Lora:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
     <!-- Favicon setup -->
-    <link rel="icon" type="image/png" href="/raz/logo.png">
-    <link rel="apple-touch-icon" href="/raz/logo.png">
-    <link rel="manifest" href="/raz/assets/manifest-B0WuBtLJ.json">
+    <link rel="icon" type="image/png" href="./logo.png">
+    <link rel="apple-touch-icon" href="./logo.png">
+    <link rel="manifest" href="./assets/manifest-B0WuBtLJ.json">
     <meta name="theme-color" content="#10b981">
-  <script type="module" crossorigin src="/raz/assets/index-CXiJ7EFZ.js"></script>
-  <link rel="modulepreload" crossorigin href="/raz/assets/vendor-CXPyfcNo.js">
-  <link rel="modulepreload" crossorigin href="/raz/assets/d3-BlDTkvQ7.js">
-  <link rel="stylesheet" crossorigin href="/raz/assets/index-B6wxvfDN.css">
+  <script type="module" crossorigin src="./assets/index-_G9G4gaU.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/vendor-CXPyfcNo.js">
+  <link rel="modulepreload" crossorigin href="./assets/d3-BlDTkvQ7.js">
+  <link rel="stylesheet" crossorigin href="./assets/index-B6wxvfDN.css">
 </head>
 <body>
     <div id="root"></div>
