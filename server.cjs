@@ -343,6 +343,58 @@ function buildCharacterDetails(char, allCharacters) {
 }
 function createCharacterApiRouter(io) {
   const router = import_express.default.Router();
+  let cachedSyncPayload = null;
+  let lastSyncPayloadTime = 0;
+  const SYNC_CACHE_TTL = 15 * 1e3;
+  router.get("/sync-data", async (req, res) => {
+    try {
+      const now = Date.now();
+      if (cachedSyncPayload && now - lastSyncPayloadTime < SYNC_CACHE_TTL) {
+        return res.json({ success: true, data: cachedSyncPayload, cached: true });
+      }
+      const roomRes = await fetch(`${FIREBASE_DB_URL}/rooms/${ROOM_ID}.json`);
+      if (!roomRes.ok) {
+        return res.status(500).json({ success: false, error: "Failed to fetch room data from database" });
+      }
+      const raw = await roomRes.json();
+      if (!raw || typeof raw !== "object") {
+        return res.json({ success: true, data: {} });
+      }
+      const toArray = (data) => {
+        if (!data) return [];
+        if (Array.isArray(data)) return data.filter(Boolean);
+        return Object.entries(data).map(([key, val]) => {
+          if (val && typeof val === "object") {
+            return { ...val, id: val.id || key };
+          }
+          return val;
+        }).filter(Boolean);
+      };
+      const payload = {
+        characters: toArray(raw.characters),
+        realms: toArray(raw.realms),
+        worlds: toArray(raw.worlds),
+        wikiEntries: toArray(raw.wikiEntries),
+        rpSessions: toArray(raw.rpSessions),
+        events: toArray(raw.events),
+        eventResponses: toArray(raw.eventResponses),
+        decks: toArray(raw.decks),
+        gameCards: toArray(raw.gameCards),
+        gameRules: toArray(raw.gameRules),
+        cardPresets: toArray(raw.cardPresets),
+        news: toArray(raw.news),
+        config: raw.config || {},
+        availableTags: Array.isArray(raw.availableTags) ? raw.availableTags : raw.availableTags ? Object.values(raw.availableTags) : [],
+        availableHiddenTags: Array.isArray(raw.availableHiddenTags) ? raw.availableHiddenTags : raw.availableHiddenTags ? Object.values(raw.availableHiddenTags) : []
+      };
+      cachedSyncPayload = payload;
+      lastSyncPayloadTime = now;
+      res.json({ success: true, data: payload, cached: false });
+    } catch (err) {
+      console.error("GET /api/sync-data error:", err);
+      res.status(500).json({ success: false, error: err?.message || "Internal server error" });
+    }
+  });
   router.get("/characters", requireApiKey({ minRole: "readonly", allowPublicRead: true }), async (req, res) => {
     try {
       const auth = req.apiKeyAuth;
