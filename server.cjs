@@ -2014,6 +2014,169 @@ async function startServer() {
       res.status(500).json({ error: err.message || "\u0412\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u044F\u044F \u043E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u043F\u0440\u0438 \u043F\u0440\u043E\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0438 \u0437\u0430\u043F\u0440\u043E\u0441\u0430" });
     }
   });
+  app.get("/api/widget/start.bat", (req, res) => {
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+    const host = req.get("host") || "localhost:3000";
+    const widgetUrl = `${protocol}://${host}/widget`;
+    const mainJsUrl = `${protocol}://${host}/api/widget/main.js`;
+    const mainJsContent = `const { app, BrowserWindow, screen, globalShortcut } = require('electron');
+let mainWindow = null;
+app.commandLine.appendSwitch('enable-transparent-visuals');
+function createWindow() {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { width, height } = primaryDisplay.workAreaSize;
+  mainWindow = new BrowserWindow({
+    width: 264,
+    height: 120,
+    x: width - 280,
+    y: height - 140,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    hasShadow: false,
+    skipTaskbar: false,
+    title: '\u0420\u0430\u0437\u043B\u043E\u043C \u041F\u043B\u0435\u0435\u0440',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      backgroundThrottling: false
+    }
+  });
+  mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  mainWindow.setVisibleOnAllWorkspaces(true);
+  const targetUrl = process.env.WIDGET_URL || '${widgetUrl}';
+  mainWindow.loadURL(targetUrl);
+  globalShortcut.register('Alt+Shift+M', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isVisible()) { mainWindow.hide(); } else { mainWindow.show(); }
+  });
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
+app.whenReady().then(createWindow);
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+`;
+    const mainJsBase64 = Buffer.from(mainJsContent, "utf8").toString("base64");
+    const batLines = [
+      "@echo off",
+      'cd /d "%~dp0"',
+      "title Razlom Widget",
+      "echo ===================================================",
+      "echo     Razlom - Desktop Widget Launcher",
+      "echo ===================================================",
+      "echo.",
+      "",
+      "where npx >nul 2>nul",
+      "if errorlevel 1 (",
+      "    echo [ERROR] Node.js is not found in system PATH.",
+      "    echo Please install Node.js (LTS) from: https://nodejs.org",
+      "    echo.",
+      "    pause",
+      "    exit /b 1",
+      ")",
+      "",
+      'if not exist "main.js" (',
+      "    echo [1/2] Downloading widget main.js...",
+      `    curl -s -k -L "${mainJsUrl}" -o "%~dp0main.js" 2>nul`,
+      '    if not exist "main.js" (',
+      `        powershell -NoProfile -ExecutionPolicy Bypass -Command "[IO.File]::WriteAllBytes('%~dp0main.js', [Convert]::FromBase64String('${mainJsBase64}'))" 2>nul`,
+      "    )",
+      ")",
+      "",
+      "echo [2/2] Starting widget...",
+      `set WIDGET_URL=${widgetUrl}`,
+      "call npx -y electron main.js",
+      "if errorlevel 1 (",
+      "    echo.",
+      "    echo [ERROR] Failed to start Electron.",
+      "    echo You can also run directly from command line:",
+      `    echo npx -y electron ${widgetUrl}`,
+      "    echo.",
+      "    pause",
+      ")"
+    ];
+    res.setHeader("Content-Disposition", 'attachment; filename="start-widget.bat"');
+    res.setHeader("Content-Type", "application/x-bat; charset=utf-8");
+    res.send(batLines.join("\r\n"));
+  });
+  app.get("/api/extension/download", (req, res) => {
+    const zipPath = import_path.default.join(process.cwd(), "browser-extension.zip");
+    if (import_fs.default.existsSync(zipPath)) {
+      res.setHeader("Content-Disposition", 'attachment; filename="razlom-browser-extension.zip"');
+      res.setHeader("Content-Type", "application/zip");
+      res.sendFile(zipPath);
+    } else {
+      res.status(404).send("Extension archive not found");
+    }
+  });
+  app.get("/api/widget/main.js", (req, res) => {
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+    const host = req.get("host") || "localhost:3000";
+    const defaultUrl = `${protocol}://${host}/widget`;
+    const mainContent = `const { app, BrowserWindow, screen, globalShortcut } = require('electron');
+
+let mainWindow = null;
+app.commandLine.appendSwitch('enable-transparent-visuals');
+
+function createWindow() {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { width, height } = primaryDisplay.workAreaSize;
+
+  mainWindow = new BrowserWindow({
+    width: 264,
+    height: 120,
+    x: width - 280,
+    y: height - 140,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    hasShadow: false,
+    skipTaskbar: false,
+    title: '\u0420\u0430\u0437\u043B\u043E\u043C \u041F\u043B\u0435\u0435\u0440',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      backgroundThrottling: false
+    }
+  });
+
+  mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  mainWindow.setVisibleOnAllWorkspaces(true);
+
+  const targetUrl = process.env.WIDGET_URL || '${defaultUrl}';
+  mainWindow.loadURL(targetUrl);
+
+  globalShortcut.register('Alt+Shift+M', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isVisible()) {
+      mainWindow.hide();
+    } else {
+      mainWindow.show();
+    }
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+app.whenReady().then(createWindow);
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
+`;
+    res.setHeader("Content-Disposition", 'attachment; filename="main.js"');
+    res.setHeader("Content-Type", "application/javascript");
+    res.send(mainContent);
+  });
   app.get("/api/proxy-image", async (req, res) => {
     try {
       const rawUrl = req.query.url;
