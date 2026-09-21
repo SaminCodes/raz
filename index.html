@@ -5,6 +5,65 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Разлом</title>
+    <script>
+      // 1. Stabilize WebSocket against Vite HMR drops in container/proxy environments
+      (function() {
+        if (typeof window !== 'undefined') {
+          const OrigWebSocket = window.WebSocket;
+          if (OrigWebSocket) {
+            window.WebSocket = function(url, protocols) {
+              const urlStr = typeof url === 'string' ? url : (url && url.href ? url.href : '');
+              if (
+                protocols === 'vite-hmr' ||
+                urlStr.includes(':24678') ||
+                (urlStr.includes('token=') && urlStr.includes('vite'))
+              ) {
+                const fakeWs = new EventTarget();
+                fakeWs.readyState = 1; // WebSocket.OPEN
+                fakeWs.binaryType = 'blob';
+                fakeWs.send = function() {};
+                fakeWs.close = function() {};
+                fakeWs.url = urlStr;
+                return fakeWs;
+              }
+              return new OrigWebSocket(url, protocols);
+            };
+            window.WebSocket.prototype = OrigWebSocket.prototype;
+            window.WebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+            window.WebSocket.OPEN = OrigWebSocket.OPEN;
+            window.WebSocket.CLOSING = OrigWebSocket.CLOSING;
+            window.WebSocket.CLOSED = OrigWebSocket.CLOSED;
+          }
+
+          // 2. Prevent spurious automated reload triggers during initial session hydration
+          try {
+            const originalReload = window.location.reload.bind(window.location);
+            let allowManualReload = false;
+            window.__allowManualReload = function() { allowManualReload = true; };
+            const pageStartTime = Date.now();
+            
+            const guardedReload = function(...args) {
+              if (allowManualReload || (Date.now() - pageStartTime > 45000)) {
+                return originalReload(...args);
+              }
+              console.warn('[App] Prevented automatic background page reload from development server disconnect.');
+            };
+
+            try {
+              Object.defineProperty(window.location, 'reload', {
+                configurable: true,
+                writable: true,
+                value: guardedReload
+              });
+            } catch (e) {
+              try {
+                window.location.reload = guardedReload;
+              } catch (e2) {}
+            }
+          } catch (e) {}
+        }
+      })();
+    </script>
     <script src="./vendor/tailwindcss.js"></script>
     <script>
       if (typeof tailwind === 'undefined') {
@@ -42,7 +101,202 @@
     <link rel="apple-touch-icon" href="./logo.png">
     <link rel="manifest" href="./assets/manifest-B0WuBtLJ.json">
     <meta name="theme-color" content="#10b981">
-  <script type="module" crossorigin src="./assets/index-Cgn9FuYU.js"></script>
+    <script id="razlom-pre-theme-init">
+      (function() {
+        try {
+          var raw = localStorage.getItem("razlom_user_preferences_cache");
+          if (!raw) return;
+          var prefs = JSON.parse(raw);
+          if (!prefs || typeof prefs !== "object") return;
+
+          var siteTheme = prefs.siteTheme || 'dark';
+          var THEME_PRESETS = {
+            dark: { bg: '#050505', text: '#d6d3d1', secText: '#78716c', primary: '#10b981' },
+            light: { bg: '#f5f5f4', text: '#1c1917', secText: '#57534e', primary: '#059669' },
+            emerald: { bg: '#022c22', text: '#ecfdf5', secText: '#34d399', primary: '#10b981' },
+            amber: { bg: '#0c0a09', text: '#fef3c7', secText: '#fbbf24', primary: '#f59e0b' },
+            crimson: { bg: '#0f0507', text: '#ffe4e6', secText: '#fb7185', primary: '#e11d48' },
+            royal: { bg: '#030712', text: '#fef08a', secText: '#a78bfa', primary: '#eab308' },
+            slate: { bg: '#020617', text: '#f8fafc', secText: '#94a3b8', primary: '#06b6d4' },
+            cyberpunk: { bg: '#120024', text: '#00ffff', secText: '#ff00ff', primary: '#f43f5e' },
+            nordic: { bg: '#0f172a', text: '#f0f9ff', secText: '#7dd3fc', primary: '#38bdf8' },
+            forest: { bg: '#06200f', text: '#f0fdf4', secText: '#86efac', primary: '#4ade80' }
+          };
+
+          var selectedPreset = THEME_PRESETS[siteTheme] || THEME_PRESETS.dark;
+          var finalBg = prefs.siteBgColor || selectedPreset.bg;
+          var finalTextColor = prefs.siteTextColor || selectedPreset.text;
+          var finalSecTextColor = prefs.siteSecondaryTextColor || selectedPreset.secText;
+          var themePrimary = prefs.primaryColor || (prefs.siteTheme && THEME_PRESETS[prefs.siteTheme] ? THEME_PRESETS[prefs.siteTheme].primary : null) || selectedPreset.primary;
+          var finalPrimaryColor = prefs.primaryColor || themePrimary;
+
+          function getRgb(str) {
+            if (!str) return "16, 185, 129";
+            var s = ("" + str).trim();
+            if (s.indexOf('rgb') === 0) {
+              var m = s.match(/\d+\s*,\s*\d+\s*,\s*\d+/);
+              return m ? m[0] : "16, 185, 129";
+            }
+            if (s.charAt(0) === '#') s = s.substring(1);
+            if (s.length === 3) s = s.charAt(0) + s.charAt(0) + s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2);
+            if (s.length === 6) {
+              var r = parseInt(s.substring(0, 2), 16);
+              var g = parseInt(s.substring(2, 4), 16);
+              var b = parseInt(s.substring(4, 6), 16);
+              if (!isNaN(r) && !isNaN(g) && !isNaN(b)) return r + ", " + g + ", " + b;
+            }
+            return "16, 185, 129";
+          }
+          var finalPrimaryRgb = getRgb(finalPrimaryColor);
+
+          var root = document.documentElement;
+          root.style.setProperty("--site-bg", finalBg);
+          root.style.setProperty("--site-text", finalTextColor);
+          root.style.setProperty("--site-sec-text", finalSecTextColor);
+          root.style.setProperty("--site-primary", finalPrimaryColor);
+          root.style.setProperty("--site-primary-rgb", finalPrimaryRgb);
+          root.style.setProperty("--primary-base", finalPrimaryColor);
+
+          var themeMeta = document.querySelector('meta[name="theme-color"]');
+          if (themeMeta) themeMeta.setAttribute('content', finalPrimaryColor);
+
+          if (prefs.interfaceScale) {
+            root.style.fontSize = (prefs.interfaceScale * 16) + "px";
+          }
+
+          var bgType = prefs.siteBgType || prefs.bgType || 'default';
+          var bgCss = "";
+          if (bgType === 'color') {
+            var c = prefs.siteBgColor || prefs.bgColor || finalBg;
+            bgCss = "background-color: " + c + " !important;";
+          } else if (bgType === 'gradient') {
+            var from = prefs.siteBgGradientFrom || prefs.bgGradientFrom || '#111827';
+            var to = prefs.siteBgGradientTo || prefs.bgGradientTo || '#1f2937';
+            var dir = prefs.siteBgGradientDirection || prefs.bgGradientDirection || 'to bottom right';
+            var bgImg = '';
+            if (dir === 'to bottom') {
+              bgImg = 'radial-gradient(circle at 50% 10%, ' + from + ' 0%, transparent 65%), radial-gradient(circle at 50% 90%, ' + to + ' 0%, transparent 65%)';
+            } else if (dir === 'to right') {
+              bgImg = 'radial-gradient(circle at 10% 50%, ' + from + ' 0%, transparent 65%), radial-gradient(circle at 90% 50%, ' + to + ' 0%, transparent 65%)';
+            } else if (dir === 'to top right') {
+              bgImg = 'radial-gradient(circle at 10% 90%, ' + from + ' 0%, transparent 65%), radial-gradient(circle at 90% 10%, ' + to + ' 0%, transparent 65%)';
+            } else {
+              bgImg = 'radial-gradient(circle at 10% 10%, ' + from + ' 0%, transparent 65%), radial-gradient(circle at 90% 90%, ' + to + ' 0%, transparent 65%)';
+            }
+            bgCss = "background-color: #050505 !important; background-image: " + bgImg + " !important; background-attachment: fixed !important; background-size: cover !important;";
+          } else if (bgType === 'image') {
+            var url = prefs.siteBgImageUrl || prefs.bgImageUrl || 'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?q=80&w=1920';
+            var dim = prefs.siteBgImageDim !== undefined ? prefs.siteBgImageDim : (prefs.bgImageDim !== undefined ? prefs.bgImageDim : 50);
+            var dimAlpha = dim / 100;
+            var size = (prefs.siteBgImageSize === 'custom' || prefs.bgImageSize === 'custom')
+              ? ((prefs.siteBgImageScale !== undefined ? prefs.siteBgImageScale : (prefs.bgImageScale !== undefined ? prefs.bgImageScale : 100)) + '%')
+              : (prefs.siteBgImageSize || prefs.bgImageSize || 'cover');
+            var posX = prefs.siteBgImagePositionX !== undefined ? prefs.siteBgImagePositionX : (prefs.bgImagePositionX !== undefined ? prefs.bgImagePositionX : 50);
+            var posY = prefs.siteBgImagePositionY !== undefined ? prefs.siteBgImagePositionY : (prefs.bgImagePositionY !== undefined ? prefs.bgImagePositionY : 50);
+            bgCss = "background-image: linear-gradient(rgba(0, 0, 0, " + dimAlpha + "), rgba(0, 0, 0, " + dimAlpha + ")), url('" + url + "') !important; background-size: " + size + " !important; background-position: " + posX + "% " + posY + "% !important; background-attachment: fixed !important; background-repeat: no-repeat !important; background-color: #050505 !important;";
+            try {
+              var preloadBg = new Image();
+              preloadBg.src = url;
+            } catch (err) {}
+          } else {
+            bgCss = "background-color: " + finalBg + " !important;";
+          }
+
+          var fontMap = {
+            pixel: "'Press Start 2P', monospace",
+            cyber: "'Orbitron', sans-serif",
+            gothic: "'Cinzel', serif",
+            serif: "'Playfair Display', serif",
+            cursive: "'Caveat', cursive",
+            horror: "'Creepster', cursive",
+            scifi: "'Orbitron', sans-serif",
+            mono: "'JetBrains Mono', monospace",
+            montserrat: "'Montserrat', sans-serif"
+          };
+          var fontCss = (prefs.siteFontFamily && fontMap[prefs.siteFontFamily]) ? fontMap[prefs.siteFontFamily] : null;
+          var isLight = siteTheme === 'light';
+
+          var css = "\n" +
+            ":root {\n" +
+            "  --site-bg: " + finalBg + ";\n" +
+            "  --site-text: " + finalTextColor + ";\n" +
+            "  --site-sec-text: " + finalSecTextColor + ";\n" +
+            "  --site-primary: " + finalPrimaryColor + ";\n" +
+            "  --site-primary-rgb: " + finalPrimaryRgb + ";\n" +
+            "  --primary-base: " + finalPrimaryColor + " !important;\n" +
+            "}\n" +
+            "html, body {\n" +
+            "  " + bgCss + "\n" +
+            "  color: var(--site-text) !important;\n" +
+            "}\n" +
+            "body, .bg-black, .bg-[#050505], .bg-stone-950, .min-h-screen:not(.custom-profile-page) {\n" +
+            (bgType !== 'default' ? "" : "  background-color: var(--site-bg) !important;\n") +
+            "}\n" +
+            ".bg-stone-900, .bg-[#0c0c0c], .bg-[#0a0a0a], .bg-[#0f0f0f], .bg-[#000], .bg-black/50, .bg-stone-950/30, .bg-stone-950/40 {\n" +
+            "  background-color: " + (isLight ? 'rgba(255, 255, 255, 0.7)' : 'rgba(20, 20, 20, 0.65)') + " !important;\n" +
+            "  border-color: " + (isLight ? 'rgba(0, 0, 0, 0.08)' : 'rgba(255, 255, 255, 0.08)') + " !important;\n" +
+            "}\n" +
+            "button.bg-stone-900, select.bg-stone-900, input.bg-stone-900,\n" +
+            "button.bg-[#0a0a0a], select.bg-[#0a0a0a], input.bg-[#0a0a0a],\n" +
+            "button.bg-stone-950, select.bg-stone-950, input.bg-stone-950,\n" +
+            "button.bg-stone-900/30, .bg-stone-900/30 {\n" +
+            "  background-color: " + (isLight ? 'rgba(0, 0, 0, 0.04)' : 'rgba(255, 255, 255, 0.05)') + " !important;\n" +
+            "  color: var(--site-text) !important;\n" +
+            "  border-color: " + (isLight ? 'rgba(0, 0, 0, 0.1)' : 'rgba(255, 255, 255, 0.1)') + " !important;\n" +
+            "}\n" +
+            "input, select, textarea { color: var(--site-text) !important; }\n" +
+            "p, h1, h2, h3, h4, h5, h6, label, span:not(.no-theme-color) { color: var(--site-text); }\n" +
+            ".text-stone-300, .text-stone-400, .text-stone-200, .text-stone-500, .text-stone-600,\n" +
+            ".text-gray-300, .text-gray-400, .text-gray-200, .text-gray-500, .text-gray-600 {\n" +
+            "  color: var(--site-sec-text) !important;\n" +
+            "}\n" +
+            ".accent-emerald-500, select { accent-color: var(--site-primary) !important; }\n" +
+            ".text-emerald-400, .text-emerald-500, .text-emerald-300,\n" +
+            ".text-teal-400, .text-teal-500, .text-teal-300,\n" +
+            ".text-amber-400, .text-amber-300, .text-amber-200,\n" +
+            ".text-\\[\\#10b981\\], .text-emerald-450 {\n" +
+            "  color: var(--site-primary) !important;\n" +
+            "}\n" +
+            ".bg-emerald-500, .bg-emerald-600, .bg-emerald-400,\n" +
+            ".bg-teal-500, .bg-teal-600, .bg-teal-400,\n" +
+            ".bg-amber-500, .bg-amber-400, .bg-amber-600 {\n" +
+            "  background-color: var(--site-primary) !important;\n" +
+            "  color: " + (isLight ? '#1c1917' : '#050505') + " !important;\n" +
+            "}\n" +
+            ".bg-emerald-500\\/20, .bg-emerald-400\\/20, .bg-emerald-950\\/20, .bg-emerald-900\\/20, .bg-amber-500\\/20, .bg-amber-500\\/15 {\n" +
+            "  background-color: rgba(var(--site-primary-rgb), 0.20) !important;\n" +
+            "}\n" +
+            ".bg-emerald-950\\/15, .bg-emerald-500\\/15, .bg-amber-500\\/10 {\n" +
+            "  background-color: rgba(var(--site-primary-rgb), 0.15) !important;\n" +
+            "}\n" +
+            ".bg-emerald-500\\/10, .bg-emerald-900\\/10, .bg-emerald-500\\/5, .bg-amber-500\\/5 {\n" +
+            "  background-color: rgba(var(--site-primary-rgb), 0.08) !important;\n" +
+            "}\n" +
+            ".border-emerald-500, .border-emerald-600, .border-emerald-500\\/50, .border-emerald-500\\/30,\n" +
+            ".border-emerald-900\\/50, .border-emerald-900\\/30, .border-emerald-500\\/20, .border-emerald-500\\/40,\n" +
+            ".border-emerald-500\\/25, .border-emerald-500\\/35, .border-emerald-400, .border-\\[\\#10b981\\]\\/10,\n" +
+            ".border-amber-500, .border-amber-400, .border-amber-500\\/50, .border-amber-500\\/40, .border-amber-500\\/30,\n" +
+            ".border-amber-500\\/20, .border-amber-400\\/50 {\n" +
+            "  border-color: var(--site-primary) !important;\n" +
+            "}\n" +
+            ".hover\\:text-emerald-400:hover, .hover\\:text-amber-300:hover, .hover\\:text-amber-400:hover {\n" +
+            "  color: var(--site-primary) !important;\n" +
+            "}\n" +
+            ".hover\\:bg-emerald-900\\/20:hover, .hover\\:bg-emerald-500\\/20:hover, .hover\\:bg-amber-500\\/20:hover {\n" +
+            "  background-color: rgba(var(--site-primary-rgb), 0.2) !important;\n" +
+            "}\n" +
+            (fontCss ? ("body, p, span, h1, h2, h3, h4, h5, h6, button, input, select, textarea, label, div:not(.no-theme-font) { font-family: " + fontCss + " !important; }\n") : "");
+
+          var styleEl = document.createElement("style");
+          styleEl.id = "global-custom-theme-style";
+          styleEl.textContent = css;
+          document.head.appendChild(styleEl);
+        } catch (e) {
+          console.warn("[Theme] Pre-render theme init skipped:", e);
+        }
+      })();
+    </script>
+  <script type="module" crossorigin src="./assets/index-BYf8YD-2.js"></script>
   <link rel="modulepreload" crossorigin href="./assets/vendor-CXPyfcNo.js">
   <link rel="modulepreload" crossorigin href="./assets/d3-BlDTkvQ7.js">
   <link rel="stylesheet" crossorigin href="./assets/index-DS4GrtgQ.css">
