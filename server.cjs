@@ -2183,17 +2183,32 @@ app.on('window-all-closed', () => {
       if (!rawUrl || !rawUrl.startsWith("http://") && !rawUrl.startsWith("https://")) {
         return res.status(400).send("Invalid URL");
       }
-      const response = await fetch(rawUrl);
-      if (!response.ok) {
-        return res.status(response.status).send("Failed to fetch upstream image");
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4e3);
+      try {
+        const response = await fetch(rawUrl, {
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+          }
+        });
+        if (!response.ok) {
+          return res.status(response.status).send(`Failed to fetch upstream image: ${response.statusText}`);
+        }
+        const contentType = response.headers.get("content-type") || "image/png";
+        const arrayBuffer = await response.arrayBuffer();
+        res.setHeader("Content-Type", contentType);
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        res.send(Buffer.from(arrayBuffer));
+      } finally {
+        clearTimeout(timeoutId);
       }
-      const contentType = response.headers.get("content-type") || "image/png";
-      const arrayBuffer = await response.arrayBuffer();
-      res.setHeader("Content-Type", contentType);
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Cache-Control", "public, max-age=86400");
-      res.send(Buffer.from(arrayBuffer));
     } catch (e) {
+      if (e.name === "AbortError") {
+        return res.status(504).send("Proxy timeout fetching upstream image");
+      }
       res.status(500).send(e.message || "Proxy error");
     }
   });
@@ -5128,29 +5143,6 @@ app.on('window-all-closed', () => {
     } catch (err) {
       console.error("YouTube info error:", err);
       res.status(500).json({ error: err.message || "Failed to fetch YouTube info" });
-    }
-  });
-  app.get("/api/proxy-image", async (req, res) => {
-    try {
-      const imageUrl = req.query.url;
-      if (!imageUrl || typeof imageUrl !== "string") {
-        return res.status(400).json({ error: "No URL provided" });
-      }
-      const response = await fetch(imageUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch image: ${response.statusText}`);
-      }
-      const contentType = response.headers.get("content-type");
-      if (contentType) {
-        res.setHeader("Content-Type", contentType);
-      }
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Cache-Control", "public, max-age=31536000");
-      const buffer = await response.arrayBuffer();
-      res.send(Buffer.from(buffer));
-    } catch (err) {
-      console.error("Image proxy error:", err);
-      res.status(500).json({ error: "Failed to proxy image" });
     }
   });
   if (process.env.NODE_ENV !== "production") {
