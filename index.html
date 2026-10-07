@@ -183,7 +183,7 @@
             } else {
               bgImg = 'radial-gradient(circle at 10% 10%, ' + from + ' 0%, transparent 65%), radial-gradient(circle at 90% 90%, ' + to + ' 0%, transparent 65%)';
             }
-            bgCss = "background-color: #050505 !important; background-image: " + bgImg + " !important; background-attachment: fixed !important; background-size: cover !important;";
+            bgCss = "background-color: #050505 !important; background-image: " + bgImg + " !important; background-size: cover !important;";
           } else if (bgType === 'image') {
             var url = prefs.siteBgImageUrl || prefs.bgImageUrl || 'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?q=80&w=1920';
             var dim = prefs.siteBgImageDim !== undefined ? prefs.siteBgImageDim : (prefs.bgImageDim !== undefined ? prefs.bgImageDim : 50);
@@ -193,7 +193,7 @@
               : (prefs.siteBgImageSize || prefs.bgImageSize || 'cover');
             var posX = prefs.siteBgImagePositionX !== undefined ? prefs.siteBgImagePositionX : (prefs.bgImagePositionX !== undefined ? prefs.bgImagePositionX : 50);
             var posY = prefs.siteBgImagePositionY !== undefined ? prefs.siteBgImagePositionY : (prefs.bgImagePositionY !== undefined ? prefs.bgImagePositionY : 50);
-            bgCss = "background-image: linear-gradient(rgba(0, 0, 0, " + dimAlpha + "), rgba(0, 0, 0, " + dimAlpha + ")), url('" + url + "') !important; background-size: " + size + " !important; background-position: " + posX + "% " + posY + "% !important; background-attachment: fixed !important; background-repeat: no-repeat !important; background-color: #050505 !important;";
+            bgCss = "background-image: linear-gradient(rgba(0, 0, 0, " + dimAlpha + "), rgba(0, 0, 0, " + dimAlpha + ")), url('" + url + "') !important; background-size: " + size + " !important; background-position: " + posX + "% " + posY + "% !important; background-repeat: no-repeat !important; background-color: #050505 !important;";
             try {
               var preloadBg = new Image();
               preloadBg.src = url;
@@ -225,8 +225,15 @@
             "  --site-primary-rgb: " + finalPrimaryRgb + ";\n" +
             "  --primary-base: " + finalPrimaryColor + " !important;\n" +
             "}\n" +
-            "html, body {\n" +
+            "#site-fixed-background {\n" +
+            "  position: fixed;\n" +
+            "  inset: 0;\n" +
+            "  pointer-events: none;\n" +
+            "  z-index: 0;\n" +
             "  " + bgCss + "\n" +
+            "}\n" +
+            "html, body {\n" +
+            "  background-color: " + finalBg + " !important;\n" +
             "  color: var(--site-text) !important;\n" +
             "}\n" +
             "body, .bg-black, .bg-[#050505], .bg-stone-950, .min-h-screen:not(.custom-profile-page) {\n" +
@@ -296,12 +303,13 @@
         }
       })();
     </script>
-  <script type="module" crossorigin src="./assets/index-D4IwSFHU.js"></script>
+  <script type="module" crossorigin src="./assets/index-BW4jQyUU.js"></script>
   <link rel="modulepreload" crossorigin href="./assets/vendor-CXPyfcNo.js">
   <link rel="modulepreload" crossorigin href="./assets/d3-BlDTkvQ7.js">
-  <link rel="stylesheet" crossorigin href="./assets/index-DS4GrtgQ.css">
+  <link rel="stylesheet" crossorigin href="./assets/index-Hc718M4D.css">
 </head>
 <body>
-    <div id="root"></div>
+    <div id="site-fixed-background" style="position: fixed; inset: 0; pointer-events: none; z-index: 0; background-color: #050505;" aria-hidden="true"></div>
+    <div id="root" style="position: relative; z-index: 1;"></div>
 </body>
 </html>
