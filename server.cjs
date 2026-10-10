@@ -3580,39 +3580,62 @@ app.on('window-all-closed', () => {
     if (!isNaN(fallback.getTime())) return fallback.getTime();
     return 0;
   }
-  function parsePostContentOnServer(rawContent) {
-    if (!rawContent) return { header: null, body: "", characterNames: [] };
+  function startsWithDivider(rawContent) {
+    if (!rawContent) return false;
     const trimmed = rawContent.trim();
-    if (trimmed.startsWith("|--")) {
-      const body = trimmed.substring(3).trim();
-      return {
-        header: "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435",
-        body,
-        characterNames: ["\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435"]
-      };
-    }
-    let match = rawContent.match(/^\s*[\u2014\u2013-]\s*([^\n\r]+?)\s*[\u2014\u2013-]\s*(?:\r?\n|$)/);
+    return /^\s*\|[-—–=]{2,}/.test(trimmed);
+  }
+  function extractCharacterHeaderOnServer(rawContent) {
+    if (!rawContent) return null;
+    const trimmed = rawContent.trim();
+    if (startsWithDivider(trimmed)) return null;
+    let match = trimmed.match(/^\s*[\u2014\u2013-]\s*([^\n\r\u2014\u2013-]{1,60}?)\s*[\u2014\u2013-]/);
     if (!match) {
-      match = rawContent.match(/^\s*__\s*(?:["'«“])?\s*([^\n\r"'«»“”_]+?)\s*(?:["'»“”])?\s*__\s*(?:\r?\n|$)/);
-    }
-    if (!match) {
-      match = rawContent.match(/^\s*_\s*(?:["'«“])?\s*([^\n\r"'«»“”_]+?)\s*(?:["'»“”])?\s*_\s*(?:\r?\n|$)/);
+      match = trimmed.match(/^\s*_{1,2}\s*(?:["'«“])?\s*([^\n\r"'«»“”_]{1,60}?)\s*(?:["'»“”])?\s*_{1,2}/);
     }
     if (match) {
       const headerLine = match[0];
-      const headerText = match[1];
-      const body = rawContent.replace(headerLine, "").trim();
-      const characterNames = headerText.split(/\s+(?:и|and|&|и)\s+|\s*[/&,]\s*/).map((n) => n.trim()).filter(Boolean);
+      const headerText = match[1].trim();
+      if (!/[.?!]/.test(headerText)) {
+        const body = trimmed.substring(headerLine.length).trim();
+        const characterNames = headerText.split(/\s+(?:и|and|&)\s+|\s*[/&,]\s*/).map((n) => n.trim()).filter(Boolean);
+        if (characterNames.length > 0) {
+          return {
+            header: headerText,
+            body,
+            characterNames
+          };
+        }
+      }
+    }
+    return null;
+  }
+  function parsePostContentOnServer(rawContent) {
+    if (!rawContent) return { header: null, body: "", characterNames: [], isDivider: false };
+    const trimmed = rawContent.trim();
+    if (startsWithDivider(trimmed)) {
+      const body = trimmed.replace(/^\s*\|[-—–=]{2,}\|?\s*/, "").trim();
       return {
-        header: headerText,
+        header: "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435",
         body,
-        characterNames
+        characterNames: ["\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435"],
+        isDivider: true
+      };
+    }
+    const charHeader = extractCharacterHeaderOnServer(trimmed);
+    if (charHeader) {
+      return {
+        header: charHeader.header,
+        body: charHeader.body,
+        characterNames: charHeader.characterNames,
+        isDivider: false
       };
     }
     return {
       header: null,
       body: rawContent,
-      characterNames: []
+      characterNames: [],
+      isDivider: false
     };
   }
   function isValidPostOnServer(post) {
@@ -3627,12 +3650,46 @@ app.on('window-all-closed', () => {
     if (/^\d+$/.test(cleanBody)) return false;
     return true;
   }
+  function resolveAuthorNameOnServer(rawAuthor, userMappings) {
+    if (!rawAuthor) return "\u0410\u043D\u043E\u043D\u0438\u043C";
+    let current = rawAuthor.trim();
+    const visited = /* @__PURE__ */ new Set();
+    while (current && !visited.has(current.toLowerCase())) {
+      visited.add(current.toLowerCase());
+      const cleanKey = current.replace(/^@/, "").trim();
+      const mapped = userMappings[current] || userMappings[cleanKey] || userMappings[`@${cleanKey}`] || userMappings[current.toLowerCase()] || userMappings[cleanKey.toLowerCase()] || userMappings[`@${cleanKey.toLowerCase()}`];
+      if (mapped && typeof mapped === "string" && mapped.trim() && mapped.trim().toLowerCase() !== current.toLowerCase()) {
+        current = mapped.trim().replace(/^@/, "");
+      } else {
+        break;
+      }
+    }
+    return current.replace(/^@/, "").trim();
+  }
   const statsCacheMap = /* @__PURE__ */ new Map();
   app.all("/api/github/all-stats", async (req, res) => {
     try {
       const now = Date.now();
       const customMappings = req.body?.mappings || {};
-      const cacheKey = JSON.stringify(customMappings);
+      const rawUserMappings = req.body?.userMappings || {};
+      const userMappings = {};
+      for (const [k, v] of Object.entries(rawUserMappings)) {
+        if (!v || typeof v !== "string") continue;
+        let decodedKey = k;
+        try {
+          decodedKey = decodeURIComponent(k.replace(/%2E/g, "."));
+        } catch (e) {
+        }
+        const cleanK = decodedKey.replace(/^@/, "").trim();
+        const cleanV = v.replace(/^@/, "").trim();
+        if (cleanK && cleanV) {
+          userMappings[cleanK] = cleanV;
+          userMappings[cleanK.toLowerCase()] = cleanV;
+          userMappings[`@${cleanK}`] = cleanV;
+          userMappings[`@${cleanK.toLowerCase()}`] = cleanV;
+        }
+      }
+      const cacheKey = JSON.stringify({ customMappings, userMappings });
       const isForceRefresh = req.query.refresh === "true";
       const cached = statsCacheMap.get(cacheKey);
       if (cached && now - cached.timestamp < CACHE_TTL && !isForceRefresh) {
@@ -3714,29 +3771,36 @@ app.on('window-all-closed', () => {
         const mergedPosts = [];
         sortedPosts.forEach((post) => {
           const rawContent = (post.Content || "").trim();
-          const parsed = parsePostContentOnServer(rawContent);
-          let hasCharacter = parsed.characterNames.length > 0;
-          if (!hasCharacter && post.Username && customMappings[post.Username]) {
-            hasCharacter = true;
-          }
-          if (hasCharacter) {
-            mergedPosts.push({ ...post });
-          } else {
-            if (mergedPosts.length > 0) {
-              const lastPost = mergedPosts[mergedPosts.length - 1];
+          const isDivider = startsWithDivider(rawContent);
+          const charHeader = extractCharacterHeaderOnServer(rawContent);
+          const hasCharName = charHeader !== null && charHeader.characterNames.length > 0;
+          const canMerge = !hasCharName && !isDivider;
+          if (canMerge && mergedPosts.length > 0) {
+            const lastPost = mergedPosts[mergedPosts.length - 1];
+            const postAuthor = resolveAuthorNameOnServer(post.Username, userMappings);
+            const lastPostAuthor = resolveAuthorNameOnServer(lastPost.Username, userMappings);
+            const sameAuthor = !post.Username || !lastPost.Username || post.Username === lastPost.Username || postAuthor === lastPostAuthor;
+            const postTime = parseDateToTimestamp(post.Date);
+            const lastTime = parseDateToTimestamp(lastPost.Date);
+            const timeDiff = postTime && lastTime ? Math.abs(postTime - lastTime) : 0;
+            const isNotMonthsApart = timeDiff < 24 * 60 * 60 * 1e3;
+            if (sameAuthor && isNotMonthsApart && !lastPost._isDivider) {
               lastPost.Content = (lastPost.Content || "") + "\n\n" + (post.Content || "");
-            } else {
-              mergedPosts.push({ ...post });
+              return;
             }
           }
+          mergedPosts.push({ ...post, _isDivider: isDivider });
         });
         mergedPosts.forEach((post) => {
           if (!isValidPostOnServer(post)) return;
           const rawContent = post.Content || "";
           const { body, characterNames: rawCharacterNames } = parsePostContentOnServer(rawContent);
+          const rawAuthor = post.Username || "";
+          const authorName = resolveAuthorNameOnServer(rawAuthor, userMappings);
           let characterNames = [];
-          if (rawCharacterNames.length === 0 && post.Username && customMappings[post.Username]) {
-            characterNames = customMappings[post.Username].split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+          if (rawCharacterNames.length === 0 && (customMappings[rawAuthor] || customMappings[authorName])) {
+            const mappedVal = customMappings[rawAuthor] || customMappings[authorName];
+            characterNames = mappedVal.split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
           } else {
             const tempNames = [];
             (rawCharacterNames.length > 0 ? rawCharacterNames : []).forEach((name) => {
@@ -3754,7 +3818,6 @@ app.on('window-all-closed', () => {
           const cleanBody = getCleanBodyText(body);
           const bodyLenClean = cleanBody.length;
           const bodyLenNoSpaces = cleanBody.replace(/\s/g, "").length;
-          const authorName = post.Username || "\u0410\u043D\u043E\u043D\u0438\u043C";
           totalPosts++;
           totalCharacters += bodyLen;
           totalCharactersClean += bodyLenClean;
@@ -4165,11 +4228,29 @@ app.on('window-all-closed', () => {
   });
   app.post("/api/github/character-advanced-stats", async (req, res) => {
     try {
-      const { name, mappings } = req.body;
+      const { name, mappings, userMappings: reqUserMappings } = req.body;
       if (!name) {
         return res.status(400).json({ error: "Character name is required" });
       }
       const customMappings = mappings || {};
+      const rawUserMappings = reqUserMappings || {};
+      const userMappings = {};
+      for (const [k, v] of Object.entries(rawUserMappings)) {
+        if (!v || typeof v !== "string") continue;
+        let decodedKey = k;
+        try {
+          decodedKey = decodeURIComponent(k.replace(/%2E/g, "."));
+        } catch (e) {
+        }
+        const cleanK = decodedKey.replace(/^@/, "").trim();
+        const cleanV = v.replace(/^@/, "").trim();
+        if (cleanK && cleanV) {
+          userMappings[cleanK] = cleanV;
+          userMappings[cleanK.toLowerCase()] = cleanV;
+          userMappings[`@${cleanK}`] = cleanV;
+          userMappings[`@${cleanK.toLowerCase()}`] = cleanV;
+        }
+      }
       const targetCharName = name.trim().toLowerCase();
       const now = Date.now();
       let csvFiles = [];
@@ -4238,29 +4319,36 @@ app.on('window-all-closed', () => {
         const mergedPosts = [];
         sortedPosts.forEach((post) => {
           const rawContent = (post.Content || "").trim();
-          const parsed = parsePostContentOnServer(rawContent);
-          let hasCharacter = parsed.characterNames.length > 0;
-          if (!hasCharacter && post.Username && customMappings[post.Username]) {
-            hasCharacter = true;
-          }
-          if (hasCharacter) {
-            mergedPosts.push({ ...post });
-          } else {
-            if (mergedPosts.length > 0) {
-              const lastPost = mergedPosts[mergedPosts.length - 1];
+          const isDivider = startsWithDivider(rawContent);
+          const charHeader = extractCharacterHeaderOnServer(rawContent);
+          const hasCharName = charHeader !== null && charHeader.characterNames.length > 0;
+          const canMerge = !hasCharName && !isDivider;
+          if (canMerge && mergedPosts.length > 0) {
+            const lastPost = mergedPosts[mergedPosts.length - 1];
+            const postAuthor = resolveAuthorNameOnServer(post.Username, userMappings);
+            const lastPostAuthor = resolveAuthorNameOnServer(lastPost.Username, userMappings);
+            const sameAuthor = !post.Username || !lastPost.Username || post.Username === lastPost.Username || postAuthor === lastPostAuthor;
+            const postTime = parseDateToTimestamp(post.Date);
+            const lastTime = parseDateToTimestamp(lastPost.Date);
+            const timeDiff = postTime && lastTime ? Math.abs(postTime - lastTime) : 0;
+            const isNotMonthsApart = timeDiff < 24 * 60 * 60 * 1e3;
+            if (sameAuthor && isNotMonthsApart && !lastPost._isDivider) {
               lastPost.Content = (lastPost.Content || "") + "\n\n" + (post.Content || "");
-            } else {
-              mergedPosts.push({ ...post });
+              return;
             }
           }
+          mergedPosts.push({ ...post, _isDivider: isDivider });
         });
         mergedPosts.forEach((post) => {
           if (!isValidPostOnServer(post)) return;
           const rawContent = post.Content || "";
           const { body, characterNames: rawCharacterNames } = parsePostContentOnServer(rawContent);
+          const rawAuthor = post.Username || "";
+          const authorName = resolveAuthorNameOnServer(rawAuthor, userMappings);
           let characterNames = [];
-          if (rawCharacterNames.length === 0 && post.Username && customMappings[post.Username]) {
-            characterNames = customMappings[post.Username].split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+          if (rawCharacterNames.length === 0 && (customMappings[rawAuthor] || customMappings[authorName])) {
+            const mappedVal = customMappings[rawAuthor] || customMappings[authorName];
+            characterNames = mappedVal.split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
           } else {
             const tempNames = [];
             (rawCharacterNames.length > 0 ? rawCharacterNames : []).forEach((name2) => {
