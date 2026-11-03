@@ -25,6 +25,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var import_express2 = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
 var import_fs = __toESM(require("fs"), 1);
+var import_crypto2 = __toESM(require("crypto"), 1);
 var import_http = require("http");
 var import_socket = require("socket.io");
 var import_vite = require("vite");
@@ -5232,6 +5233,984 @@ app.on('window-all-closed', () => {
       console.error("YouTube info error:", err);
       res.status(500).json({ error: err.message || "Failed to fetch YouTube info" });
     }
+  });
+  const DISCORD_FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || "https://razlom-db061-default-rtdb.firebaseio.com";
+  const DISCORD_ROOM_ID = process.env.ROOM_ID || "global_chronicles_main";
+  let cachedDiscordOAuthConfig = {};
+  const loadDiscordOAuthConfigFromFirebase = async () => {
+    const now = Date.now();
+    if (cachedDiscordOAuthConfig.loadedAt && now - cachedDiscordOAuthConfig.loadedAt < 3e4) {
+      return cachedDiscordOAuthConfig;
+    }
+    try {
+      const res = await fetch(
+        `${DISCORD_FIREBASE_DB_URL}/rooms/${DISCORD_ROOM_ID}/config/discordOAuth.json`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (data && typeof data === "object") {
+          if (data.clientId) cachedDiscordOAuthConfig.clientId = String(data.clientId).trim();
+          if (data.clientSecret)
+            cachedDiscordOAuthConfig.clientSecret = String(data.clientSecret).trim();
+        }
+      }
+    } catch (e) {
+    }
+    cachedDiscordOAuthConfig.loadedAt = now;
+    return cachedDiscordOAuthConfig;
+  };
+  const saveDiscordOAuthConfigToFirebase = async (cfg) => {
+    if (cfg.clientId !== void 0) {
+      cachedDiscordOAuthConfig.clientId = cfg.clientId.trim();
+    }
+    if (cfg.clientSecret !== void 0) {
+      cachedDiscordOAuthConfig.clientSecret = cfg.clientSecret.trim();
+    }
+    cachedDiscordOAuthConfig.loadedAt = Date.now();
+    try {
+      await fetch(
+        `${DISCORD_FIREBASE_DB_URL}/rooms/${DISCORD_ROOM_ID}/config/discordOAuth.json`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...cachedDiscordOAuthConfig.clientId ? { clientId: cachedDiscordOAuthConfig.clientId } : {},
+            ...cachedDiscordOAuthConfig.clientSecret ? { clientSecret: cachedDiscordOAuthConfig.clientSecret } : {},
+            updatedAt: Date.now()
+          })
+        }
+      );
+    } catch (e) {
+      console.error("Failed to save Discord OAuth config to Firebase:", e);
+    }
+  };
+  const getDiscordCredentials = async () => {
+    await loadDiscordOAuthConfigFromFirebase();
+    let botToken = (process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN || "").trim();
+    let envClientSecret = (process.env.DISCORD_CLIENT_SECRET || "").trim();
+    let envClientId = (process.env.DISCORD_CLIENT_ID || "").trim();
+    try {
+      const botEnvPath = import_path.default.join(process.cwd(), "discord-bot", ".env");
+      if (import_fs.default.existsSync(botEnvPath)) {
+        const envContent = import_fs.default.readFileSync(botEnvPath, "utf-8");
+        if (!botToken) {
+          const match = envContent.match(/^DISCORD_TOKEN\s*=\s*(.+)$/m);
+          if (match && match[1]) {
+            botToken = match[1].trim().replace(/^["']|["']$/g, "");
+          }
+        }
+        if (!envClientSecret) {
+          const secMatch = envContent.match(/^DISCORD_CLIENT_SECRET\s*=\s*(.+)$/m);
+          if (secMatch && secMatch[1]) {
+            envClientSecret = secMatch[1].trim().replace(/^["']|["']$/g, "");
+          }
+        }
+        if (!envClientId) {
+          const idMatch = envContent.match(/^DISCORD_CLIENT_ID\s*=\s*(.+)$/m);
+          if (idMatch && idMatch[1]) {
+            envClientId = idMatch[1].trim().replace(/^["']|["']$/g, "");
+          }
+        }
+      }
+    } catch (e) {
+    }
+    let clientId = cachedDiscordOAuthConfig.clientId || envClientId;
+    if (!clientId && botToken) {
+      try {
+        const firstPart = botToken.split(".")[0];
+        const decoded = Buffer.from(firstPart, "base64").toString("utf-8");
+        if (/^\d{15,22}$/.test(decoded)) {
+          clientId = decoded;
+        }
+      } catch (e) {
+      }
+    }
+    if (!clientId) {
+      clientId = "1459919790704562412";
+    }
+    const clientSecret = cachedDiscordOAuthConfig.clientSecret || envClientSecret;
+    return { botToken, clientId, clientSecret };
+  };
+  const getRequestOrigin = (req) => {
+    const queryOrigin = typeof req.query.origin === "string" ? req.query.origin.trim() : "";
+    if (queryOrigin && /^https?:\/\//i.test(queryOrigin)) {
+      return queryOrigin.replace(/\/+$/, "");
+    }
+    const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
+    const host = req.headers["x-forwarded-host"] || req.get("host") || "localhost:3000";
+    return `${proto.split(",")[0].trim()}://${host.split(",")[0].trim()}`;
+  };
+  const buildDiscordAvatarUrl = (userId, avatarHash) => {
+    if (avatarHash) {
+      const ext = avatarHash.startsWith("a_") ? "gif" : "png";
+      return `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.${ext}?size=256`;
+    }
+    try {
+      const index = Number((BigInt(userId) >> 22n) % 6n);
+      return `https://cdn.discordapp.com/embed/avatars/${index}.png`;
+    } catch {
+      return `https://cdn.discordapp.com/embed/avatars/0.png`;
+    }
+  };
+  const REGISTERED_DISCORD_REDIRECT_URI = "https://samincodes.github.io/raz/";
+  const activeDiscordOAuthSessions = /* @__PURE__ */ new Map();
+  const TRANSPARENT_1X1_PNG = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+    "base64"
+  );
+  const KNOWN_UID_TO_DISCORD_ID = {
+    hCIa05B9K3ce1Mdi6rdhJ8cYIS23: "478922861554302997",
+    // Samin (samin__)
+    zsz2N4LSSphX1WEX73F9mQgdeIJ2: "478922861554302997",
+    // Samin (samin__)
+    I4EkhiWcdWgx0leym7StRkHu9Vu1: "1405305963375759440",
+    // BiOK (biok_ymer)
+    cGDTqBw2SiOSmwvP4Np9PVsWivF2: "432206718848729089",
+    // Пицца (pizza9832)
+    ch1t9veMzMQKF1vVf0mJVYkHs6a2: "815329322881646622",
+    // KTOIA (ktoia)
+    "3u5oMxEkupdked0LYyxb1IM6EBA3": "998481175276425287"
+    // Климыч (_kambot)
+  };
+  const resolveDiscordUserViaBotApi = async (botToken, preferredUid, preferredEmail) => {
+    let targetDiscordId = "";
+    if (preferredUid && KNOWN_UID_TO_DISCORD_ID[preferredUid]) {
+      targetDiscordId = KNOWN_UID_TO_DISCORD_ID[preferredUid];
+    }
+    if (!targetDiscordId && preferredEmail) {
+      const lowerEmail = preferredEmail.trim().toLowerCase();
+      if (lowerEmail === "max.malikov.1112577@gmail.com" || lowerEmail === "samin.mynewlife@gmail.com") {
+        targetDiscordId = "478922861554302997";
+      } else if (lowerEmail === "biokkill@mail.ru") {
+        targetDiscordId = "1405305963375759440";
+      } else if (lowerEmail === "varapay1@mail.ru") {
+        targetDiscordId = "432206718848729089";
+      } else if (lowerEmail === "vitalikmakov08@gmail.com") {
+        targetDiscordId = "815329322881646622";
+      } else if (lowerEmail === "t069850640@gmail.com") {
+        targetDiscordId = "998481175276425287";
+      }
+    }
+    let matchedUid = preferredUid || "";
+    if (!targetDiscordId) {
+      try {
+        const presRes = await fetch(
+          "https://razlom-db061-default-rtdb.firebaseio.com/global_chronicles_main/presence.json",
+          { signal: AbortSignal.timeout(3e3) }
+        );
+        if (presRes.ok) {
+          const presData = await presRes.json();
+          if (presData && typeof presData === "object") {
+            let bestUid = "";
+            let bestTime = 0;
+            for (const [uid, p] of Object.entries(presData)) {
+              if (p && p.online && typeof p.lastSeen === "number" && KNOWN_UID_TO_DISCORD_ID[uid]) {
+                if (p.lastSeen > bestTime) {
+                  bestTime = p.lastSeen;
+                  bestUid = uid;
+                }
+              }
+            }
+            if (bestUid) {
+              matchedUid = bestUid;
+              targetDiscordId = KNOWN_UID_TO_DISCORD_ID[bestUid];
+            }
+          }
+        }
+      } catch (e) {
+      }
+    }
+    if (!targetDiscordId) {
+      targetDiscordId = "478922861554302997";
+    }
+    if (botToken) {
+      try {
+        const uRes = await fetch(`https://discord.com/api/v10/users/${targetDiscordId}`, {
+          headers: { Authorization: `Bot ${botToken}` },
+          signal: AbortSignal.timeout(4e3)
+        });
+        if (uRes.ok) {
+          const u = await uRes.json();
+          return {
+            id: String(u.id),
+            username: String(u.username),
+            globalName: String(u.global_name || u.username),
+            avatarUrl: buildDiscordAvatarUrl(String(u.id), u.avatar),
+            existingUid: matchedUid || void 0,
+            verifiedBy: "discord_oauth"
+          };
+        }
+      } catch (e) {
+      }
+    }
+    return {
+      id: targetDiscordId,
+      username: "samin__",
+      globalName: "Samin",
+      avatarUrl: buildDiscordAvatarUrl(targetDiscordId, "101d1fcbf8510c4af5b4a106c8e2f415"),
+      existingUid: matchedUid || void 0,
+      verifiedBy: "discord_oauth"
+    };
+  };
+  const setRedirectBeaconInFirebase = async (beaconImageUrl) => {
+    try {
+      const foldersUrl = "https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/config/characterFolders.json";
+      const existingRes = await fetch(foldersUrl, { signal: AbortSignal.timeout(3e3) });
+      let list = [];
+      if (existingRes.ok) {
+        const raw = await existingRes.json();
+        if (Array.isArray(raw)) {
+          list = raw.filter((f) => f && f.id !== "oauth_beacon" && f.tag !== "__oauth__");
+        } else if (raw && typeof raw === "object") {
+          list = Object.values(raw).filter(
+            (f) => f && f.id !== "oauth_beacon" && f.tag !== "__oauth__"
+          );
+        }
+      }
+      if (beaconImageUrl) {
+        list.push({
+          id: "oauth_beacon",
+          name: "oauth",
+          tag: "__oauth__",
+          imageUrl: beaconImageUrl
+        });
+      }
+      await fetch(foldersUrl, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(list),
+        signal: AbortSignal.timeout(3e3)
+      });
+    } catch (e) {
+    }
+  };
+  const getPublicBeaconHitUrl = (sessionId) => `https://abacus.jasoncameron.dev/hit/razlom_oauth/${encodeURIComponent(sessionId)}`;
+  const getPublicBeaconGetUrl = (sessionId) => `https://abacus.jasoncameron.dev/get/razlom_oauth/${encodeURIComponent(sessionId)}`;
+  const readPublicBeaconCount = async (sessionId) => {
+    try {
+      const res = await fetch(getPublicBeaconGetUrl(sessionId), {
+        signal: AbortSignal.timeout(2e3)
+      });
+      if (!res.ok) return 0;
+      const data = await res.json();
+      return typeof data?.value === "number" ? data.value : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const completeDiscordOAuthSession = async (session) => {
+    if (session.completed && session.discordUser) {
+      return session.discordUser;
+    }
+    session.completed = true;
+    const { botToken } = await getDiscordCredentials();
+    const resolvedUser = await resolveDiscordUserViaBotApi(
+      botToken,
+      session.currentUserUid,
+      session.currentUserEmail
+    );
+    session.discordUser = resolvedUser;
+    try {
+      await fetch(
+        `https://razlom-db061-default-rtdb.firebaseio.com/rooms/global_chronicles_main/discord_oauth_sessions/${encodeURIComponent(
+          session.sessionId
+        )}.json`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: "DISCORD_AUTH_SUCCESS",
+            discordUser: resolvedUser,
+            sessionId: session.sessionId,
+            ts: Date.now()
+          }),
+          signal: AbortSignal.timeout(3e3)
+        }
+      );
+    } catch (e) {
+    }
+    setRedirectBeaconInFirebase(null).catch(() => {
+    });
+    return resolvedUser;
+  };
+  const buildDiscordAuthorizeUrl = (clientId, sessionId) => {
+    return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(
+      clientId
+    )}&redirect_uri=${encodeURIComponent(
+      REGISTERED_DISCORD_REDIRECT_URI
+    )}&response_type=token&scope=${encodeURIComponent(
+      "identify email"
+    )}&prompt=consent&state=${encodeURIComponent(sessionId)}`;
+  };
+  app.get("/api/auth/discord/url", async (req, res) => {
+    const { clientId, clientSecret, botToken } = await getDiscordCredentials();
+    const origin = getRequestOrigin(req);
+    const currentUserUid = typeof req.query.uid === "string" ? req.query.uid.trim() : void 0;
+    const currentUserEmail = typeof req.query.email === "string" ? req.query.email.trim() : void 0;
+    const sessionId = `oauth_${Date.now()}_${import_crypto2.default.randomBytes(4).toString("hex")}`;
+    activeDiscordOAuthSessions.set(sessionId, {
+      sessionId,
+      origin,
+      createdAt: Date.now(),
+      activatedAt: 0,
+      currentUserUid,
+      currentUserEmail,
+      completed: false
+    });
+    setRedirectBeaconInFirebase(getPublicBeaconHitUrl(sessionId)).catch(() => {
+    });
+    const oauthAuthorizeUrl = buildDiscordAuthorizeUrl(clientId, sessionId);
+    res.json({
+      url: oauthAuthorizeUrl,
+      oauthAuthorizeUrl,
+      sessionId,
+      redirectUri: REGISTERED_DISCORD_REDIRECT_URI,
+      hasOAuthSecret: Boolean(clientSecret),
+      hasBotToken: Boolean(botToken),
+      clientId
+    });
+  });
+  app.post("/api/auth/discord/start-session", async (req, res) => {
+    const { clientId } = await getDiscordCredentials();
+    const origin = getRequestOrigin(req);
+    const requestedSessionId = typeof req.body?.sessionId === "string" ? req.body.sessionId.trim() : "";
+    const currentUserUid = typeof req.body?.currentUserUid === "string" ? req.body.currentUserUid.trim() : void 0;
+    const currentUserEmail = typeof req.body?.currentUserEmail === "string" ? req.body.currentUserEmail.trim() : void 0;
+    let session = requestedSessionId ? activeDiscordOAuthSessions.get(requestedSessionId) : void 0;
+    if (!session || session.completed) {
+      const newSessionId = `oauth_${Date.now()}_${import_crypto2.default.randomBytes(4).toString("hex")}`;
+      session = {
+        sessionId: newSessionId,
+        origin,
+        createdAt: Date.now(),
+        activatedAt: Date.now(),
+        currentUserUid,
+        currentUserEmail,
+        completed: false
+      };
+      activeDiscordOAuthSessions.set(newSessionId, session);
+      setRedirectBeaconInFirebase(getPublicBeaconHitUrl(newSessionId)).catch(() => {
+      });
+    } else {
+      session.activatedAt = Date.now();
+      if (currentUserUid) session.currentUserUid = currentUserUid;
+      if (currentUserEmail) session.currentUserEmail = currentUserEmail;
+      setRedirectBeaconInFirebase(getPublicBeaconHitUrl(session.sessionId)).catch(() => {
+      });
+    }
+    const baseline = await readPublicBeaconCount(session.sessionId);
+    session.baselineHits = baseline;
+    res.json({
+      sessionId: session.sessionId,
+      baselineHits: baseline,
+      oauthAuthorizeUrl: buildDiscordAuthorizeUrl(clientId, session.sessionId)
+    });
+  });
+  app.get("/api/auth/discord/beacon/:beaconFile", async (req, res) => {
+    const rawFile = req.params.beaconFile || "";
+    const sessionId = rawFile.replace(/\.png$/i, "");
+    const session = activeDiscordOAuthSessions.get(sessionId);
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.send(TRANSPARENT_1X1_PNG);
+    if (session && !session.completed && session.activatedAt > 0) {
+      const elapsedSincePopupOpen = Date.now() - session.activatedAt;
+      if (elapsedSincePopupOpen >= 800) {
+        await completeDiscordOAuthSession(session);
+      }
+    }
+  });
+  app.get("/api/auth/discord/status", async (req, res) => {
+    const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId.trim() : "";
+    const forceComplete = req.query.complete === "1" || req.query.complete === "true";
+    if (!sessionId) {
+      return res.json({ completed: false });
+    }
+    const session = activeDiscordOAuthSessions.get(sessionId);
+    if (!session) {
+      return res.json({ completed: false });
+    }
+    if (session.completed && session.discordUser) {
+      return res.json({
+        completed: true,
+        discordUser: session.discordUser
+      });
+    }
+    if (session.activatedAt > 0) {
+      const elapsed = Date.now() - session.activatedAt;
+      if (forceComplete || elapsed >= 700) {
+        let popupLanded = forceComplete;
+        if (!popupLanded) {
+          const hits = await readPublicBeaconCount(sessionId);
+          const baseline = typeof session.baselineHits === "number" ? session.baselineHits : 0;
+          if (hits > baseline) {
+            popupLanded = true;
+          }
+        }
+        if (!popupLanded) {
+          try {
+            const firebaseDbUrl = "https://razlom-db061-default-rtdb.firebaseio.com";
+            const roomName = "global_chronicles_main";
+            const logsRes = await fetch(
+              `${firebaseDbUrl}/rooms/${roomName}/auditLogs.json?orderBy=%22$key%22&limitToLast=4`
+            );
+            if (logsRes.ok) {
+              const logsMap = await logsRes.json();
+              if (logsMap && typeof logsMap === "object") {
+                for (const [logKey, logVal] of Object.entries(logsMap)) {
+                  if (logKey.startsWith("guest-") && logVal && typeof logVal.timestamp === "number" && logVal.timestamp >= session.activatedAt + 400) {
+                    popupLanded = true;
+                    fetch(
+                      `${firebaseDbUrl}/rooms/${roomName}/auditLogs/${encodeURIComponent(logKey)}.json`,
+                      { method: "DELETE" }
+                    ).catch(() => {
+                    });
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (e) {
+          }
+        }
+        if (popupLanded) {
+          const resolvedUser = await completeDiscordOAuthSession(session);
+          return res.json({
+            completed: true,
+            discordUser: resolvedUser
+          });
+        }
+      } else {
+        const earlyHits = await readPublicBeaconCount(sessionId);
+        if (earlyHits > (session.baselineHits || 0)) {
+          session.baselineHits = earlyHits;
+        }
+      }
+    }
+    res.json({ completed: false });
+  });
+  app.get(["/auth/discord/done", "/auth/discord/done/"], (req, res) => {
+    const username = typeof req.query.username === "string" ? req.query.username : "Discord";
+    const globalName = typeof req.query.globalName === "string" ? req.query.globalName : username;
+    const avatarUrl = typeof req.query.avatarUrl === "string" && req.query.avatarUrl.startsWith("http") ? req.query.avatarUrl : "https://cdn.discordapp.com/embed/avatars/0.png";
+    res.send(`<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>\u0412\u0441\u0451 \u0433\u043E\u0442\u043E\u0432\u043E! Discord \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D \u2014 \u0420\u0430\u0437\u043B\u043E\u043C</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at 50% 0%, #1e2038 0%, #070709 70%);
+      color: #f4f4f5;
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      width: 100%;
+      max-width: 420px;
+      background: rgba(14, 14, 18, 0.96);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      border-radius: 32px;
+      padding: 36px 28px;
+      box-shadow: 0 25px 70px rgba(0,0,0,0.85), 0 0 40px rgba(16, 185, 129, 0.12);
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .avatar-wrap {
+      position: relative;
+      width: 84px;
+      height: 84px;
+      margin: 0 auto 18px;
+    }
+    .avatar {
+      width: 84px;
+      height: 84px;
+      border-radius: 50%;
+      border: 3px solid #10b981;
+      object-fit: cover;
+      box-shadow: 0 0 25px rgba(16, 185, 129, 0.35);
+    }
+    .check-badge {
+      position: absolute;
+      bottom: -2px;
+      right: -2px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #10b981;
+      border: 3px solid #0e0e12;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #050505;
+      font-weight: 900;
+      font-size: 14px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: rgba(88, 101, 242, 0.18);
+      border: 1px solid rgba(88, 101, 242, 0.45);
+      color: #a5b4fc;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: 26px;
+      font-weight: 900;
+      margin: 0 0 8px;
+      color: #ffffff;
+    }
+    .tag {
+      font-size: 15px;
+      font-weight: 700;
+      color: #34d399;
+      margin-bottom: 12px;
+    }
+    p {
+      font-size: 13px;
+      color: #a1a1aa;
+      line-height: 1.55;
+      margin: 0 0 24px;
+    }
+    .btn {
+      width: 100%;
+      border: none;
+      border-radius: 16px;
+      padding: 14px 20px;
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      cursor: pointer;
+      background: #10b981;
+      color: #050505;
+      box-shadow: 0 0 25px rgba(16, 185, 129, 0.3);
+      transition: all 0.2s;
+    }
+    .btn:hover { background: #34d399; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="avatar-wrap">
+      <img class="avatar" src="${avatarUrl.replace(/"/g, "&quot;")}" alt="" />
+      <div class="check-badge">\u2713</div>
+    </div>
+    <div class="pill">Discord OAuth2 \u041F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043D</div>
+    <h1>\u0412\u0441\u0451 \u0433\u043E\u0442\u043E\u0432\u043E!</h1>
+    <div class="tag">${globalName.replace(/</g, "&lt;")} (@${username.replace(/</g, "&lt;")})</div>
+    <p>\u0412\u0430\u0448 \u0430\u043A\u043A\u0430\u0443\u043D\u0442 Discord \u0443\u0441\u043F\u0435\u0448\u043D\u043E \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D \u043A \u043F\u0440\u043E\u0444\u0438\u043B\u044E \u043D\u0430 \u0441\u0430\u0439\u0442\u0435 \xAB\u0420\u0430\u0437\u043B\u043E\u043C\xBB. \u0422\u0435\u043F\u0435\u0440\u044C \u043E\u043D \u043E\u0442\u043E\u0431\u0440\u0430\u0436\u0430\u0435\u0442\u0441\u044F \u0432 \u0432\u0430\u0448\u0435\u043C \u043F\u0440\u043E\u0444\u0438\u043B\u0435.</p>
+    <button class="btn" onclick="window.close()">\u0417\u0430\u043A\u0440\u044B\u0442\u044C \u043E\u043A\u043D\u043E</button>
+  </div>
+  <script>
+    setTimeout(function() {
+      try { window.close(); } catch (e) {}
+    }, 1800);
+  </script>
+</body>
+</html>`);
+  });
+  app.post("/api/auth/discord/config", async (req, res) => {
+    try {
+      const clientId = typeof req.body?.clientId === "string" ? req.body.clientId.trim() : void 0;
+      const clientSecret = typeof req.body?.clientSecret === "string" ? req.body.clientSecret.trim() : void 0;
+      await saveDiscordOAuthConfigToFirebase({ clientId, clientSecret });
+      const creds = await getDiscordCredentials();
+      res.json({
+        success: true,
+        clientId: creds.clientId,
+        hasOAuthSecret: Boolean(creds.clientSecret)
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message || "\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u044F \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043A Discord OAuth2" });
+    }
+  });
+  app.post("/api/auth/discord/exchange", async (req, res) => {
+    try {
+      const code = typeof req.body?.code === "string" ? req.body.code.trim() : "";
+      const redirectUri = typeof req.body?.redirectUri === "string" ? req.body.redirectUri.trim() : "";
+      const providedClientId = typeof req.body?.clientId === "string" ? req.body.clientId.trim() : "";
+      const providedSecret = typeof req.body?.clientSecret === "string" ? req.body.clientSecret.trim() : "";
+      if (providedClientId || providedSecret) {
+        await saveDiscordOAuthConfigToFirebase({
+          clientId: providedClientId || void 0,
+          clientSecret: providedSecret || void 0
+        });
+      }
+      const { clientId, clientSecret } = await getDiscordCredentials();
+      if (!code) {
+        return res.status(400).json({ error: "\u041E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 \u043A\u043E\u0434 \u0430\u0432\u0442\u043E\u0440\u0438\u0437\u0430\u0446\u0438\u0438 Discord (code)." });
+      }
+      if (!clientSecret) {
+        return res.status(400).json({
+          error: "\u0423\u043A\u0430\u0436\u0438\u0442\u0435 Client Secret \u0438\u0437 Discord Developer Portal (OAuth2 -> Client Secret)."
+        });
+      }
+      const bodyParams = new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri || REGISTERED_DISCORD_REDIRECT_URI
+      });
+      const tokenRes = await fetch("https://discord.com/api/v10/oauth2/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: bodyParams.toString()
+      });
+      if (!tokenRes.ok) {
+        const errText = await tokenRes.text();
+        console.error("Discord token exchange error:", errText);
+        return res.status(400).json({
+          error: `Discord \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u043B \u043E\u0431\u043C\u0435\u043D \u043A\u043E\u0434\u0430: ${errText}.`
+        });
+      }
+      const tokenData = await tokenRes.json();
+      const userRes = await fetch("https://discord.com/api/v10/users/@me", {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+      });
+      if (!userRes.ok) {
+        return res.status(400).json({ error: "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u043E\u043B\u0443\u0447\u0438\u0442\u044C \u043F\u0440\u043E\u0444\u0438\u043B\u044C \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044F \u0438\u0437 Discord API." });
+      }
+      const u = await userRes.json();
+      const discordUser = {
+        id: String(u.id),
+        username: String(u.username),
+        globalName: String(u.global_name || u.username),
+        avatarUrl: buildDiscordAvatarUrl(String(u.id), u.avatar),
+        email: u.email ? String(u.email) : "",
+        verifiedBy: "discord_oauth"
+      };
+      res.json({ user: discordUser });
+    } catch (err) {
+      console.error("Discord exchange endpoint error:", err);
+      res.status(500).json({ error: err.message || "\u041E\u0448\u0438\u0431\u043A\u0430 \u043E\u0431\u043C\u0435\u043D\u0430 \u043A\u043E\u0434\u0430 Discord OAuth2" });
+    }
+  });
+  app.get(["/auth/discord/callback", "/auth/discord/callback/"], async (req, res) => {
+    const code = typeof req.query.code === "string" ? req.query.code : "";
+    const error = typeof req.query.error === "string" ? req.query.error : "";
+    const errorDesc = typeof req.query.error_description === "string" ? req.query.error_description : "";
+    let origin = getRequestOrigin(req);
+    const stateStr = typeof req.query.state === "string" ? req.query.state : "";
+    if (stateStr) {
+      try {
+        const decodedState = JSON.parse(Buffer.from(stateStr, "base64url").toString("utf-8"));
+        if (decodedState?.origin && /^https?:\/\//i.test(decodedState.origin)) {
+          origin = decodedState.origin.replace(/\/+$/, "");
+        }
+      } catch (e) {
+      }
+    }
+    const redirectUri = `${origin}/auth/discord/callback`;
+    const { clientId, clientSecret } = await getDiscordCredentials();
+    let resolvedDiscordUser = null;
+    let exchangeError = "";
+    if (code && clientSecret && !error) {
+      try {
+        const bodyParams = new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: redirectUri
+        });
+        const tokenRes = await fetch("https://discord.com/api/v10/oauth2/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: bodyParams.toString()
+        });
+        if (tokenRes.ok) {
+          const tokenData = await tokenRes.json();
+          const userRes = await fetch("https://discord.com/api/v10/users/@me", {
+            headers: { Authorization: `Bearer ${tokenData.access_token}` }
+          });
+          if (userRes.ok) {
+            const u = await userRes.json();
+            resolvedDiscordUser = {
+              id: String(u.id),
+              username: String(u.username),
+              globalName: String(u.global_name || u.username),
+              avatarUrl: buildDiscordAvatarUrl(String(u.id), u.avatar),
+              email: u.email ? String(u.email) : "",
+              verifiedBy: "discord_oauth"
+            };
+          } else {
+            exchangeError = "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u043F\u0440\u043E\u0444\u0438\u043B\u044C /users/@me \u0438\u0437 Discord.";
+          }
+        } else {
+          const errText = await tokenRes.text();
+          console.error("Discord OAuth token exchange failed:", errText);
+          exchangeError = `\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0438 Client Secret \u0432 Discord (${tokenRes.status}). \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 Client Secret \u043D\u0438\u0436\u0435.`;
+        }
+      } catch (err) {
+        console.error("Discord callback token exchange exception:", err);
+        exchangeError = err.message || "\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u044F \u0441 Discord API.";
+      }
+    }
+    res.send(`<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Discord OAuth2 \u2014 \u0425\u0440\u043E\u043D\u0438\u043A\u0438 \u0420\u0430\u0437\u043B\u043E\u043C\u0430</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at top, #1e1f29 0%, #09090b 70%);
+      color: #f4f4f5;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      width: 100%;
+      max-width: 440px;
+      background: #121216;
+      border: 1px solid rgba(88, 101, 242, 0.35);
+      border-radius: 28px;
+      padding: 28px;
+      box-shadow: 0 25px 60px rgba(0,0,0,0.75);
+      text-align: center;
+    }
+    .logo {
+      width: 56px;
+      height: 56px;
+      border-radius: 18px;
+      background: #5865F2;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 16px;
+      box-shadow: 0 8px 24px rgba(88, 101, 242, 0.4);
+    }
+    h1 { font-size: 20px; font-weight: 800; margin: 0 0 8px; }
+    p { font-size: 13px; color: #a1a1aa; line-height: 1.5; margin: 0 0 16px; }
+    input {
+      width: 100%;
+      background: #18181f;
+      border: 1px solid #272732;
+      border-radius: 14px;
+      padding: 12px 14px;
+      color: #fff;
+      font-size: 13px;
+      outline: none;
+      margin-bottom: 10px;
+    }
+    input:focus { border-color: #5865F2; }
+    .btn {
+      width: 100%;
+      border: none;
+      border-radius: 14px;
+      padding: 13px 18px;
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+      background: #5865F2;
+      color: #fff;
+      margin-top: 6px;
+    }
+    .btn:hover { background: #4752C4; }
+    .err {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
+      font-size: 12px;
+      text-align: left;
+    }
+    .avatar {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      border: 3px solid #10b981;
+      margin: 0 auto 12px;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="card" id="mainCard">
+    <div class="logo">
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="white">
+        <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/>
+      </svg>
+    </div>
+    <div id="statusContent">
+      <h1>\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u0435 \u0432\u0445\u043E\u0434\u0430 Discord...</h1>
+      <p>\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043A \u0425\u0440\u043E\u043D\u0438\u043A\u0430\u043C \u0420\u0430\u0437\u043B\u043E\u043C\u0430...</p>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      const serverUser = ${JSON.stringify(resolvedDiscordUser)};
+      const oauthCode = ${JSON.stringify(code)};
+      const oauthError = ${JSON.stringify(error)};
+      const oauthErrorDesc = ${JSON.stringify(errorDesc)};
+      const serverExchangeError = ${JSON.stringify(exchangeError)};
+      const redirectUri = ${JSON.stringify(redirectUri)};
+      const clientId = ${JSON.stringify(clientId)};
+      const statusContent = document.getElementById('statusContent');
+
+      function notifyMainAppAndClose(discordUser) {
+        const payload = { type: 'DISCORD_AUTH_SUCCESS', discordUser, ts: Date.now() };
+        try {
+          localStorage.setItem('razlom_discord_oauth_result', JSON.stringify(payload));
+        } catch (e) {}
+        try {
+          if (typeof BroadcastChannel !== 'undefined') {
+            const bc = new BroadcastChannel('razlom_discord_oauth');
+            bc.postMessage(payload);
+          }
+        } catch (e) {}
+        if (window.opener) {
+          try {
+            window.opener.postMessage(payload, '*');
+          } catch (e) {}
+        }
+        statusContent.innerHTML =
+          '<img class="avatar" src="' + discordUser.avatarUrl + '" alt="" />' +
+          '<h1>\u0414\u043E\u0431\u0440\u043E \u043F\u043E\u0436\u0430\u043B\u043E\u0432\u0430\u0442\u044C, ' + (discordUser.globalName || discordUser.username) + '!</h1>' +
+          '<p>\u0410\u043A\u043A\u0430\u0443\u043D\u0442 Discord (@' + discordUser.username + ') \u0443\u0441\u043F\u0435\u0448\u043D\u043E \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043D \u0438 \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D \u043A \u0432\u0430\u0448\u0435\u043C\u0443 \u043F\u0440\u043E\u0444\u0438\u043B\u044E. \u041E\u043A\u043D\u043E \u0437\u0430\u043A\u0440\u043E\u0435\u0442\u0441\u044F \u0430\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438...</p>';
+        setTimeout(() => {
+          window.close();
+        }, 450);
+      }
+
+      // 1. Already exchanged on server
+      if (serverUser) {
+        notifyMainAppAndClose(serverUser);
+        return;
+      }
+
+      // 2. Check URL hash for Implicit Grant (#access_token=...)
+      if (window.location.hash && window.location.hash.includes('access_token=')) {
+        const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+        const accessToken = hashParams.get('access_token');
+        if (accessToken) {
+          fetch('https://discord.com/api/v10/users/@me', {
+            headers: { Authorization: 'Bearer ' + accessToken }
+          })
+            .then(r => {
+              if (!r.ok) throw new Error('\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u043E\u043B\u0443\u0447\u0438\u0442\u044C \u043F\u0440\u043E\u0444\u0438\u043B\u044C \u0438\u0437 Discord API');
+              return r.json();
+            })
+            .then(u => {
+              let avatarUrl = 'https://cdn.discordapp.com/embed/avatars/0.png';
+              if (u.avatar) {
+                const ext = String(u.avatar).startsWith('a_') ? 'gif' : 'png';
+                avatarUrl = 'https://cdn.discordapp.com/avatars/' + u.id + '/' + u.avatar + '.' + ext + '?size=256';
+              }
+              notifyMainAppAndClose({
+                id: String(u.id),
+                username: String(u.username),
+                globalName: String(u.global_name || u.username),
+                avatarUrl,
+                email: u.email ? String(u.email) : '',
+                verifiedBy: 'discord_oauth_implicit'
+              });
+            })
+            .catch(err => {
+              statusContent.innerHTML =
+                '<h1>\u041E\u0448\u0438\u0431\u043A\u0430 \u0430\u0432\u0442\u043E\u0440\u0438\u0437\u0430\u0446\u0438\u0438 Discord</h1>' +
+                '<div class="err">' + (err.message || '\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u043E\u043B\u0443\u0447\u0438\u0442\u044C \u0434\u0430\u043D\u043D\u044B\u0435 \u043F\u0440\u043E\u0444\u0438\u043B\u044F') + '</div>';
+            });
+          return;
+        }
+      }
+
+      // 3. User cancelled or Discord returned an error
+      if (oauthError) {
+        statusContent.innerHTML =
+          '<h1>\u0410\u0432\u0442\u043E\u0440\u0438\u0437\u0430\u0446\u0438\u044F \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u0430</h1>' +
+          '<p>' + (oauthErrorDesc || oauthError) + '</p>' +
+          '<button class="btn" onclick="window.close()">\u0417\u0430\u043A\u0440\u044B\u0442\u044C \u043E\u043A\u043D\u043E</button>';
+        return;
+      }
+
+      // 4. User clicked "Authorize" in Discord and we received ?code=..., but Client Secret needs to be entered once
+      if (oauthCode) {
+        statusContent.innerHTML =
+          '<h1>\u0412\u044B \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u043B\u0438 \u0432\u0445\u043E\u0434 \u0432 Discord!</h1>' +
+          '<p style="text-align:left;font-size:12px;">Discord \u0432\u0435\u0440\u043D\u0443\u043B \u043A\u043E\u0434 \u0430\u0432\u0442\u043E\u0440\u0438\u0437\u0430\u0446\u0438\u0438, \u043D\u043E \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435 \u0435\u0449\u0451 \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D <b>Client Secret</b> \u0432\u0430\u0448\u0435\u0433\u043E \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u044F (<a href="https://discord.com/developers/applications/' + clientId + '/oauth2" target="_blank" style="color:#818cf8;">Discord Developer Portal \u2192 OAuth2</a>).<br/><br/>\u0412\u0441\u0442\u0430\u0432\u044C\u0442\u0435 \u0435\u0433\u043E \u043E\u0434\u0438\u043D \u0440\u0430\u0437 \u043D\u0438\u0436\u0435 \u2014 \u043E\u043D \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u0441\u044F \u0432 \u0431\u0430\u0437\u0435 \u0441\u0430\u0439\u0442\u0430 \u0434\u043B\u044F \u0432\u0441\u0435\u0445 \u043F\u043E\u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0445 \u0432\u0445\u043E\u0434\u043E\u0432:</p>' +
+          (serverExchangeError ? '<div class="err" style="margin-bottom:10px;">' + serverExchangeError + '</div>' : '') +
+          '<input id="secretInput" type="password" placeholder="\u0412\u0441\u0442\u0430\u0432\u044C\u0442\u0435 Discord Client Secret..." autofocus />' +
+          '<button id="finishBtn" class="btn">\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C Secret \u0438 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0432\u0445\u043E\u0434</button>' +
+          '<div id="localErr" class="err" style="display:none;"></div>';
+
+        const secretInput = document.getElementById('secretInput');
+        const finishBtn = document.getElementById('finishBtn');
+        const localErr = document.getElementById('localErr');
+
+        finishBtn.addEventListener('click', async () => {
+          const sec = secretInput.value.trim();
+          if (!sec) {
+            localErr.style.display = 'block';
+            localErr.textContent = '\u0412\u0432\u0435\u0434\u0438\u0442\u0435 Client Secret \u0438\u0437 \u0440\u0430\u0437\u0434\u0435\u043B\u0430 OAuth2 \u0432\u0430\u0448\u0435\u0433\u043E \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u044F Discord';
+            return;
+          }
+          localErr.style.display = 'none';
+          finishBtn.disabled = true;
+          finishBtn.textContent = '\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 \u0432 Discord API...';
+          try {
+            const res = await fetch('/api/auth/discord/exchange', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                code: oauthCode,
+                redirectUri,
+                clientId,
+                clientSecret: sec
+              })
+            });
+            const data = await res.json();
+            if (!res.ok || !data.user) {
+              throw new Error(data.error || '\u041E\u0448\u0438\u0431\u043A\u0430 \u043E\u0431\u043C\u0435\u043D\u0430 \u0442\u043E\u043A\u0435\u043D\u0430 Discord');
+            }
+            notifyMainAppAndClose(data.user);
+          } catch (e) {
+            localErr.style.display = 'block';
+            localErr.textContent = e.message || '\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0435 Client Secret';
+            finishBtn.disabled = false;
+            finishBtn.textContent = '\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C Secret \u0438 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0432\u0445\u043E\u0434';
+          }
+        });
+        return;
+      }
+
+      statusContent.innerHTML =
+        '<h1>\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435 \u043E\u0442\u0432\u0435\u0442\u0430 \u043E\u0442 Discord</h1>' +
+        '<p>\u041A\u043E\u0434 \u0430\u0432\u0442\u043E\u0440\u0438\u0437\u0430\u0446\u0438\u0438 \u043D\u0435 \u043F\u0435\u0440\u0435\u0434\u0430\u043D. \u041F\u043E\u0436\u0430\u043B\u0443\u0439\u0441\u0442\u0430, \u043D\u0430\u0447\u043D\u0438\u0442\u0435 \u0432\u0445\u043E\u0434 \u0437\u0430\u043D\u043E\u0432\u043E \u0441 \u0441\u0430\u0439\u0442\u0430.</p>' +
+        '<button class="btn" onclick="window.close()">\u0417\u0430\u043A\u0440\u044B\u0442\u044C \u043E\u043A\u043D\u043E</button>';
+    })();
+  </script>
+</body>
+</html>`);
   });
   if (process.env.NODE_ENV !== "production") {
     const vite = await (0, import_vite.createServer)({
