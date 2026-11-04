@@ -6213,14 +6213,23 @@ app.on('window-all-closed', () => {
 </html>`);
   });
   if (process.env.NODE_ENV !== "production") {
-    const vite = await (0, import_vite.createServer)({
+    let viteMiddleware = null;
+    const vitePromise = (0, import_vite.createServer)({
       server: {
         middlewareMode: true,
         hmr: false
       },
       appType: "spa"
+    }).then((vite) => {
+      viteMiddleware = vite.middlewares;
+      return vite;
     });
-    app.use(vite.middlewares);
+    app.use(async (req, res, next) => {
+      if (!viteMiddleware) {
+        await vitePromise;
+      }
+      return viteMiddleware(req, res, next);
+    });
   } else {
     const distPath = import_path.default.join(process.cwd(), "dist");
     app.use("/.proxy", import_express2.default.static(distPath));
