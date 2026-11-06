@@ -6,6 +6,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Разлом</title>
     <script>
+      // Automatically detect and configure base path for GitHub Pages subpath deployment
+      (function() {
+        try {
+          var baseEl = document.createElement('base');
+          if (window.location.hostname.endsWith('github.io')) {
+            var parts = window.location.pathname.split('/').filter(Boolean);
+            if (parts.length > 0 && parts[0] !== 'rp' && parts[0] !== 'room') {
+              baseEl.href = '/' + parts[0] + '/';
+            } else {
+              baseEl.href = './';
+            }
+          } else {
+            baseEl.href = '/';
+          }
+          document.head.prepend(baseEl);
+        } catch (e) {}
+      })();
+    </script>
+    <script>
       // 0. Handle Discord OAuth2 Implicit Grant (#access_token=...) immediately on redirect
       (function() {
         try {
@@ -408,10 +427,10 @@
         }
       })();
     </script>
-  <script type="module" crossorigin src="./assets/index-DNVSQZ8F.js"></script>
+  <script type="module" crossorigin src="./assets/index-DXdeBn_2.js"></script>
   <link rel="modulepreload" crossorigin href="./assets/vendor-BzX_wYBb.js">
   <link rel="modulepreload" crossorigin href="./assets/d3-BlDTkvQ7.js">
-  <link rel="stylesheet" crossorigin href="./assets/index-CA1EoeVb.css">
+  <link rel="stylesheet" crossorigin href="./assets/index-B9dJc7px.css">
 </head>
 <body>
     <div id="site-fixed-background" style="position: fixed; inset: 0; pointer-events: none; z-index: 0; background-color: #050505;" aria-hidden="true"></div>
