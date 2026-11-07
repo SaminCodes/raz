@@ -4,6 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Разлом</title>
     <script>
       // Automatically detect and cache base path for GitHub Pages subpath deployment
@@ -19,6 +22,31 @@
           } else {
             window.__RAZLOM_BASE_URL__ = '/';
           }
+        } catch (e) {}
+
+        // Early check on cold start: if cached build differs from fresh version.json, bust cache before mounting
+        try {
+          var vUrl = (window.__RAZLOM_BASE_URL__ || '/') + 'version.json?_t=' + Date.now();
+          fetch(vUrl, { cache: 'no-store' })
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(d) {
+              if (d && d.version) {
+                var storedV = localStorage.getItem('razlom_current_build_id');
+                if (storedV && storedV !== d.version) {
+                  // Newer version detected on cold load
+                  localStorage.setItem('razlom_current_build_id', d.version);
+                  if (!sessionStorage.getItem('razlom_startup_reloaded')) {
+                    sessionStorage.setItem('razlom_startup_reloaded', '1');
+                    var u = new URL(window.location.href);
+                    u.searchParams.set('_v', d.version);
+                    window.location.replace(u.toString());
+                  }
+                } else if (!storedV) {
+                  localStorage.setItem('razlom_current_build_id', d.version);
+                }
+              }
+            })
+            .catch(function() {});
         } catch (e) {}
       })();
     </script>
@@ -428,7 +456,7 @@
         }
       })();
     </script>
-  <script type="module" crossorigin src="./assets/index-BBHXRCG6.js"></script>
+  <script type="module" crossorigin src="./assets/index-Dg6EmzJv.js"></script>
   <link rel="modulepreload" crossorigin href="./assets/vendor-BzX_wYBb.js">
   <link rel="modulepreload" crossorigin href="./assets/d3-BlDTkvQ7.js">
   <link rel="stylesheet" crossorigin href="./assets/index-B9dJc7px.css">
