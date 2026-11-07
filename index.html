@@ -6,21 +6,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Разлом</title>
     <script>
-      // Automatically detect and configure base path for GitHub Pages subpath deployment
+      // Automatically detect and cache base path for GitHub Pages subpath deployment
       (function() {
         try {
-          var baseEl = document.createElement('base');
           if (window.location.hostname.endsWith('github.io')) {
             var parts = window.location.pathname.split('/').filter(Boolean);
             if (parts.length > 0 && parts[0] !== 'rp' && parts[0] !== 'room') {
-              baseEl.href = '/' + parts[0] + '/';
+              window.__RAZLOM_BASE_URL__ = '/' + parts[0] + '/';
             } else {
-              baseEl.href = './';
+              window.__RAZLOM_BASE_URL__ = '/';
             }
           } else {
-            baseEl.href = '/';
+            window.__RAZLOM_BASE_URL__ = '/';
           }
-          document.head.prepend(baseEl);
         } catch (e) {}
       })();
     </script>
@@ -416,7 +414,10 @@
             ".hover\\:bg-emerald-900\\/20:hover, .hover\\:bg-emerald-500\\/20:hover, .hover\\:bg-amber-500\\/20:hover {\n" +
             "  background-color: rgba(var(--site-primary-rgb), 0.2) !important;\n" +
             "}\n" +
-            (fontCss ? ("body, p, span, h1, h2, h3, h4, h5, h6, button, input, select, textarea, label, div:not(.no-theme-font) { font-family: " + fontCss + " !important; }\n") : "");
+            (fontCss ? ("body, p, span, h1, h2, h3, h4, h5, h6, button, input, select, textarea, label, div:not(.no-theme-font) { font-family: " + fontCss + " !important; }\n") : "") +
+            "#razlom-news-portal { --site-text: #ffffff !important; --site-sec-text: #d6d3d1 !important; color: #ffffff !important; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important; }\n" +
+            "#razlom-news-portal .font-serif, #razlom-news-portal h1, #razlom-news-portal h2, #razlom-news-portal h3, #razlom-news-portal h4 { font-family: 'Cinzel', 'Playfair Display', Georgia, serif !important; }\n" +
+            "#razlom-news-portal .font-mono { font-family: 'JetBrains Mono', monospace !important; }\n";
 
           var styleEl = document.createElement("style");
           styleEl.id = "global-custom-theme-style";
@@ -427,7 +428,7 @@
         }
       })();
     </script>
-  <script type="module" crossorigin src="./assets/index-DXdeBn_2.js"></script>
+  <script type="module" crossorigin src="./assets/index-IimZEf0W.js"></script>
   <link rel="modulepreload" crossorigin href="./assets/vendor-BzX_wYBb.js">
   <link rel="modulepreload" crossorigin href="./assets/d3-BlDTkvQ7.js">
   <link rel="stylesheet" crossorigin href="./assets/index-B9dJc7px.css">
